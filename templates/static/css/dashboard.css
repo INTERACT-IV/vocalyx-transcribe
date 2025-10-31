@@ -1,0 +1,346 @@
+/* dashboard.css */
+:root {
+    --primary: #4a90e2;
+    --success: #28a745;
+    --warning: #ffc107;
+    --danger: #dc3545;
+    --light: #f8f9fa;
+    --dark: #343a40;
+}
+
+body {
+    font-family: 'Inter', sans-serif;
+    margin: 0;
+    background: #f0f2f5;
+    color: #333;
+}
+
+header {
+    position: sticky;
+    top: 0;
+    background: linear-gradient(90deg, var(--primary), #357ABD);
+    padding: 0.7rem 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 1000;
+    color: white;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+}
+
+.filters {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.filters select, .filters input {
+    padding: 0.3rem 0.5rem;
+    border-radius: 6px;
+    border: none;
+    background: white;
+    color: #333;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.3s;
+}
+
+.filters select:hover, .filters input:hover {
+    background: #e0e0e0;
+}
+
+.btn {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.3rem 0.7rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+    text-decoration: none;
+}
+
+.btn:hover {
+    opacity: 0.9;
+    transform: scale(1.02);
+}
+
+.btn-primary {
+    background: var(--primary);
+}
+
+.btn-success {
+    background: var(--success);
+}
+
+.btn-warning {
+    background: var(--warning);
+    color: #212529;
+}
+
+.btn-danger {
+    background: var(--danger);
+}
+
+#current-time {
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+
+h1 {
+    text-align: center;
+    margin: 1rem 0;
+}
+
+.cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    justify-content: center;
+    padding: 1rem;
+    min-height: 200px;
+}
+
+.card {
+    background: white;
+    border-radius: 14px;
+    padding: 1.3rem;
+    width: 320px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+    transition: transform 0.3s ease, box-shadow 0.3s ease, opacity 0.3s ease;
+    position: relative;
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(20px);
+}
+
+.card.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 14px 28px rgba(0,0,0,0.15);
+}
+
+.status-badge {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: gray;
+    transition: background 0.3s;
+}
+
+.status-badge::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    right: 120%;
+    top: 50%;
+    transform: translateY(-50%);
+    background: var(--dark);
+    color: white;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    opacity: 0;
+    transition: opacity 0.3s;
+    white-space: nowrap;
+}
+
+.card:hover .status-badge::after {
+    opacity: 1;
+}
+
+.status-pending .status-badge {
+    background: linear-gradient(45deg, #6c757d, #adb5bd);
+}
+
+.status-pending .status-badge::after {
+    content: "En attente";
+}
+
+.status-processing .status-badge {
+    background: linear-gradient(45deg, var(--warning), #ffd966);
+    animation: pulse 2s infinite;
+}
+
+.status-processing .status-badge::after {
+    content: "En cours";
+}
+
+.status-done .status-badge {
+    background: linear-gradient(45deg, var(--success), #5cd65c);
+}
+
+.status-done .status-badge::after {
+    content: "Terminé";
+}
+
+.status-error .status-badge {
+    background: linear-gradient(45deg, var(--danger), #ff6b6b);
+}
+
+.status-error .status-badge::after {
+    content: "Erreur";
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.card h3 {
+    margin-top: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.card p {
+    margin: 0.3rem 0;
+    font-size: 0.92rem;
+    line-height: 1.35;
+}
+
+.card-buttons {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.8rem;
+}
+
+.card-buttons button {
+    flex: 1;
+    padding: 0.4rem;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 10000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    background-color: rgba(0,0,0,0.5);
+    animation: fadeIn 0.3s;
+}
+
+.modal-content {
+    background-color: #ffffff;
+    margin: 3% auto;
+    padding: 1.5rem;
+    border-radius: 14px;
+    width: 90%;
+    max-width: 1000px;
+    box-shadow: 0 12px 30px rgba(0,0,0,0.18);
+    position: relative;
+    max-height: 80vh;
+    overflow-y: auto;
+    animation: scaleIn 0.3s;
+}
+
+.close {
+    color: #aaa;
+    float: right;
+    font-size: 1.5rem;
+    font-weight: bold;
+    position: absolute;
+    right: 1rem;
+    top: 0.5rem;
+    cursor: pointer;
+    transition: color 0.2s;
+}
+
+.close:hover {
+    color: black;
+}
+
+.segment {
+    border-bottom: 1px solid #ddd;
+    padding: 0.5rem 0;
+    cursor: pointer;
+}
+
+.segment:hover {
+    background: #f0f0f0;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes scaleIn {
+    from { transform: scale(0.95); }
+    to { transform: scale(1); }
+}
+
+.pagination {
+    display: flex;
+    justify-content: center;
+    gap: 0.5rem;
+    margin: 1rem 0;
+}
+
+.pagination button {
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 6px;
+    background: var(--light);
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.pagination button:hover {
+    background: #d0d0d0;
+}
+
+.pagination button.active {
+    background: var(--primary);
+    color: white;
+}
+
+button:focus, [tabindex="0"]:focus {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(255,255,255,0.8);
+    display: none;
+    justify-content: center;
+    align-items: center;
+    z-index: 9999;
+}
+
+.spinner {
+    border: 4px solid #f3f3f3;
+    border-top: 4px solid var(--primary);
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
