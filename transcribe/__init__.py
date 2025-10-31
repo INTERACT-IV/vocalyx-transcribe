@@ -4,10 +4,7 @@ Gère la transcription audio via faster-whisper
 """
 
 from .transcription import (
-    initialize_whisper_model,
-    cleanup_resources,
-    run_transcription_optimized,
-    whisper_model
+    TranscriptionService
 )
 
 from .audio_utils import (
@@ -19,10 +16,7 @@ from .audio_utils import (
 )
 
 __all__ = [
-    'initialize_whisper_model',
-    'cleanup_resources',
-    'run_transcription_optimized',
-    'whisper_model',
+    'TranscriptionService',
     'sanitize_filename',
     'get_audio_duration',
     'preprocess_audio',

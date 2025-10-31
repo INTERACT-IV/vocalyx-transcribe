@@ -25,6 +25,10 @@ class Config:
     def _create_default_config(self):
         """Crée un fichier de configuration par défaut"""
         config = configparser.ConfigParser()
+
+        config['CORE'] = {
+            'instance_name': 'worker-01'
+        }
         
         config['WHISPER'] = {
             'model': 'small',
@@ -77,6 +81,10 @@ class Config:
     
     def _load_settings(self):
         """Charge les paramètres dans des attributs"""
+
+        # CORE
+        self.instance_name = self.config.get('CORE', 'instance_name', fallback=f"worker-{os.getpid()}")
+
         # WHISPER
         self.model = self.config.get('WHISPER', 'model')
         self.device = self.config.get('WHISPER', 'device')

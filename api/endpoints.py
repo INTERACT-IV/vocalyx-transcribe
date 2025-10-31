@@ -4,81 +4,23 @@ Points de terminaison API
 
 import json
 import logging
-import uuid
-from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from config import Config
-from database import Transcription, SessionLocal
+from database import Transcription
 from models.schemas import TranscriptionResult
 from api.dependencies import get_db
 
-# Import depuis le nouveau module transcribe
-from transcribe.transcription import run_transcription_optimized
-from transcribe.audio_utils import sanitize_filename
-
 config = Config()
 logger = logging.getLogger(__name__)
-limiter = Limiter(key_func=get_remote_address)
 templates = Jinja2Templates(directory=config.templates_dir)
 
 router = APIRouter()
-
-@router.post("/transcribe", summary="Créer une transcription", tags=["Transcriptions"])
-@limiter.limit(f"{config.rate_limit}/minute")
-async def create_transcription(
-    request: Request,
-    file: UploadFile = File(...),
-    translate: Optional[bool] = False,
-    use_vad: Optional[bool] = True
-):
-    from transcribe.transcription import whisper_model
-    
-    if whisper_model is None:
-        raise HTTPException(503, "Service starting up. Please wait.")
-    
-    filename = sanitize_filename(file.filename or "upload")
-    ext = filename.split('.')[-1].lower()
-    
-    if ext not in config.allowed_extensions:
-        raise HTTPException(400, f"Unsupported: {ext}")
-
-    content = await file.read()
-    file_size_mb = len(content) / (1024 * 1024)
-    
-    if file_size_mb > config.max_file_size_mb:
-        raise HTTPException(413, f"File too large: {file_size_mb:.2f}MB")
-
-    transcription_id = str(uuid.uuid4())
-    tmp_path = config.upload_dir / f"{transcription_id}_{filename}"
-    
-    with open(tmp_path, "wb") as fh:
-        fh.write(content)
-
-    db = SessionLocal()
-    db.add(Transcription(
-        id=transcription_id,
-        status="pending",
-        vad_enabled=1 if use_vad else 0,
-        enrichment_requested=1,  # Par défaut, on enrichit
-        created_at=datetime.utcnow()
-    ))
-    db.commit()
-    db.close()
-
-    logger.info(f"[{transcription_id}] 📥 {filename} ({file_size_mb:.2f}MB) | VAD: {use_vad}")
-    
-    import asyncio
-    asyncio.create_task(run_transcription_optimized(transcription_id, tmp_path, translate, use_vad))
-
-    return {"transcription_id": transcription_id, "status": "pending"}
 
 @router.get("/transcribe/count", tags=["Transcriptions"])
 def get_transcription_count(db: Session = Depends(get_db)):
@@ -95,14 +37,31 @@ def get_transcription_count(db: Session = Depends(get_db)):
 
     result = {"total": 0, "pending": 0, "processing": 0, "done": 0, "error": 0}
     for status, count in counts:
-        result[status] = count
-        result["total"] += count
+        if status in result:
+            result[status] = count
+            result["total"] += count
 
     return result
 
 @router.get("/transcribe/recent", response_model=List[TranscriptionResult], tags=["Transcriptions"])
-def get_recent_transcriptions(limit: int = Query(10, ge=1, le=100), db: Session = Depends(get_db)):
-    entries = db.query(Transcription).order_by(Transcription.created_at.desc()).limit(limit).all()
+def get_recent_transcriptions(
+    limit: int = Query(10, ge=1, le=100), 
+    page: int = Query(1, ge=1),
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Récupère les transcriptions récentes avec filtres et pagination.
+    """
+    query = db.query(Transcription)
+    
+    if status:
+        query = query.filter(Transcription.status == status)
+    if search:
+        query = query.filter(Transcription.text.ilike(f"%{search}%"))
+        
+    entries = query.order_by(Transcription.created_at.desc()).limit(limit).offset((page - 1) * limit).all()
     
     results = []
     for entry in entries:
@@ -110,6 +69,7 @@ def get_recent_transcriptions(limit: int = Query(10, ge=1, le=100), db: Session 
         results.append({
             "id": entry.id,
             "status": entry.status,
+            "worker_id": entry.worker_id, # 🆕 Ajouté
             "language": entry.language,
             "processing_time": float(entry.processing_time) if entry.processing_time else None,
             "duration": float(entry.duration) if entry.duration else None,
@@ -133,6 +93,7 @@ def get_transcription(transcription_id: str, db: Session = Depends(get_db)):
     return {
         "id": entry.id,
         "status": entry.status,
+        "worker_id": entry.worker_id, # 🆕 Ajouté
         "language": entry.language,
         "processing_time": float(entry.processing_time) if entry.processing_time else None,
         "duration": float(entry.duration) if entry.duration else None,
@@ -163,6 +124,9 @@ def dashboard(request: Request, limit: int = 10, db: Session = Depends(get_db)):
 def get_config():
     """Retourne la configuration actuelle (sans données sensibles)"""
     return {
+        "core": {
+            "instance_name": config.instance_name
+        },
         "whisper": {
             "model": config.model,
             "device": config.device,
@@ -191,12 +155,27 @@ def reload_config():
         raise HTTPException(500, f"Failed to reload config: {str(e)}")
 
 @router.get("/health", tags=["System"])
-def health_check():
-    from transcribe.transcription import whisper_model
+def health_check(request: Request):
+    """Modifié pour utiliser app.state"""
+    service = request.app.state.transcription_service
+    model_loaded = service.model is not None
     
     return {
-        "status": "healthy" if whisper_model else "starting",
-        "model_loaded": whisper_model is not None,
+        "status": "healthy" if model_loaded else "starting",
+        "model_loaded": model_loaded,
         "timestamp": datetime.utcnow().isoformat(),
         "config_file": "config.ini"
+    }
+
+@router.get("/worker/status", tags=["System"])
+def get_worker_status(request: Request):
+    """🆕 Nouveau endpoint pour le monitoring"""
+    service = request.app.state.transcription_service
+    config = request.app.state.config
+    
+    return {
+        "instance_name": config.instance_name,
+        "status": "idle" if service.active_tasks == 0 else "processing",
+        "max_workers": config.max_workers,
+        "active_tasks": service.active_tasks
     }

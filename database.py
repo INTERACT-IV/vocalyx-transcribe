@@ -19,7 +19,12 @@ class Transcription(Base):
     __tablename__ = "transcriptions"
     
     id = Column(String, primary_key=True, index=True)
-    status = Column(Enum("pending", "processing", "done", "error"), default="pending")
+    status = Column(Enum("pending", "processing", "done", "error"), default="pending", index=True)
+    
+    # 🆕 Champs pour le multi-worker
+    worker_id = Column(String, nullable=True, index=True)
+    file_path = Column(String, nullable=True)
+
     language = Column(String, nullable=True)
     processing_time = Column(Float, nullable=True)
     duration = Column(Float, nullable=True)
