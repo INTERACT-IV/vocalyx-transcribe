@@ -4,6 +4,9 @@ Points de terminaison API
 
 import json
 import logging
+import platform
+import psutil
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -69,7 +72,8 @@ def get_recent_transcriptions(
         results.append({
             "id": entry.id,
             "status": entry.status,
-            "worker_id": entry.worker_id, # 🆕 Ajouté
+            "project_name": entry.project_name,
+            "worker_id": entry.worker_id,
             "language": entry.language,
             "processing_time": float(entry.processing_time) if entry.processing_time else None,
             "duration": float(entry.duration) if entry.duration else None,
@@ -93,7 +97,8 @@ def get_transcription(transcription_id: str, db: Session = Depends(get_db)):
     return {
         "id": entry.id,
         "status": entry.status,
-        "worker_id": entry.worker_id, # 🆕 Ajouté
+        "project_name": entry.project_name,
+        "worker_id": entry.worker_id,
         "language": entry.language,
         "processing_time": float(entry.processing_time) if entry.processing_time else None,
         "duration": float(entry.duration) if entry.duration else None,
@@ -172,10 +177,30 @@ def get_worker_status(request: Request):
     """🆕 Nouveau endpoint pour le monitoring"""
     service = request.app.state.transcription_service
     config = request.app.state.config
+
+    usage_percent = 0
+    if config.max_workers > 0:
+        usage_percent = round((service.active_tasks / config.max_workers) * 100, 1)
+        
+    # Calcul Uptime
+    uptime_seconds = (datetime.utcnow() - service.start_time).total_seconds()
     
     return {
         "instance_name": config.instance_name,
         "status": "idle" if service.active_tasks == 0 else "processing",
         "max_workers": config.max_workers,
-        "active_tasks": service.active_tasks
+        "active_tasks": service.active_tasks,
+        "usage_percent": usage_percent,
+        
+        # 🆕 Stats machine
+        "machine_name": platform.node(),
+        "cpu_usage_percent": psutil.cpu_percent(),
+        "memory_usage_percent": psutil.virtual_memory().percent,
+        
+        # 🆕 Stats cumulatives
+        "start_time_utc": service.start_time.isoformat(),
+        "uptime_seconds": uptime_seconds,
+        "total_jobs_completed": service.total_jobs_completed,
+        "total_audio_processed_s": round(service.total_audio_processed_s, 2),
+        "total_processing_time_s": round(service.total_processing_time_s, 2),
     }

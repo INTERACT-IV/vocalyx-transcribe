@@ -8,6 +8,7 @@ from pydantic import BaseModel
 class TranscriptionResult(BaseModel):
     id: str
     status: str
+    project_name: Optional[str] = None
     language: Optional[str] = None
     processing_time: Optional[float] = None
     duration: Optional[float] = None

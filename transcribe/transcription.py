@@ -30,6 +30,12 @@ class TranscriptionService:
     def __init__(self, config: Config):
         self.config = config
         self.active_tasks = 0
+
+        self.start_time = datetime.utcnow()
+        self.total_jobs_completed = 0
+        self.total_audio_processed_s = 0.0
+        self.total_processing_time_s = 0.0
+
         self._load_model()
         
     def _load_model(self):
@@ -186,6 +192,12 @@ class TranscriptionService:
             entry.segments_count = len(full_segments)
             entry.finished_at = datetime.utcnow()
             db.commit()
+
+
+            # 7. Statistiques globales
+            self.total_jobs_completed += 1
+            self.total_audio_processed_s += original_duration
+            self.total_processing_time_s += processing_time
             
             logger.info(
                 f"[{transcription_id}] ✅ Completed: {len(full_segments)} segments | "

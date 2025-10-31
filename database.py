@@ -20,6 +20,8 @@ class Transcription(Base):
     
     id = Column(String, primary_key=True, index=True)
     status = Column(Enum("pending", "processing", "done", "error"), default="pending", index=True)
+
+    project_name = Column(String, index=True, default="default")
     
     # 🆕 Champs pour le multi-worker
     worker_id = Column(String, nullable=True, index=True)
