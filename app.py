@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Vocalyx API",
     description="Vocalyx transforme automatiquement les enregistrements de call centers en transcriptions enrichies et exploitables.",
-    version="1.4.0",  # Bump version
+    version="1.0.0",  # Bump version
     contact={"name": "Guilhem RICHARD", "email": "guilhem.l.richard@gmail.com"},
     lifespan=lifespan
 )
@@ -93,7 +93,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "app:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=True,
         log_config=log_config
     )
