@@ -1,0 +1,60 @@
+<!-- dashboard.html -->
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Vocalyx - Transcriptions Dashboard</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/toastr@2.1.4/build/toastr.min.css">
+<link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+<div class="loading-overlay" id="loading-overlay">
+    <div class="spinner"></div>
+</div>
+
+<header>
+    <div class="filters">
+        <label for="status-filter">Statut:</label>
+        <select id="status-filter">
+            <option value="">Tous</option>
+            <option value="pending">En attente</option>
+            <option value="processing">En cours</option>
+            <option value="done">Terminé</option>
+            <option value="error">Erreur</option>
+        </select>
+        <input type="text" id="search-input" placeholder="Rechercher...">
+    </div>
+    <div style="display:flex;align-items:center;gap:1rem;">
+        <div id="current-time"></div>
+        <a href="/docs" class="btn btn-primary">
+            <span>API Docs</span>
+        </a>
+    </div>
+    <div style="display:flex;align-items:center;gap:0.5rem;">
+        <input type="file" id="upload-input" accept="audio/*" style="display:none;">
+        <button id="upload-btn" class="btn btn-warning">Upload Audio</button>
+        <button id="export-btn" class="btn btn-success">Exporter</button>
+    </div>
+</header>
+
+<h1>Transcriptions récentes</h1>
+<div class="cards" id="cards-container"></div>
+<div class="pagination" id="pagination"></div>
+
+<div id="modal" class="modal">
+    <div class="modal-content">
+        <span class="close">&times;</span>
+        <div id="modal-body"></div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/toastr@2.1.4/build/toastr.min.js"></script>
+<script src="/static/js/utils.js"></script>
+<script src="/static/js/modal.js"></script>
+<script src="/static/js/cards.js"></script>
+<script src="/static/js/events.js"></script>
+<script src="/static/js/polling.js"></script>
+<script src="/static/js/main.js"></script>
+</body>
+</html>
