@@ -121,17 +121,23 @@ class TranscriptionService:
             self.active_tasks -= 1
             return
             
-        file_path = Path(file_path_str)
-        
-        # Mettre à jour le statut (déjà 'processing' mais re-confirmer)
-        entry.worker_id = worker_id
-        entry.status = "processing"
-        db.commit()
+        # ❗️ MODIFICATION: Sécurisation du chemin de fichier
+        file_path_from_db = file_path_str
+        file_path = None # Sera défini dans le try/except
         
         segment_paths = []
         processed_path = None
 
         try:
+            # ❗️ MODIFICATION: Reconstruire le chemin de manière sécurisée
+            base_upload_dir = self.config.upload_dir.resolve()
+            # Utilise .name pour s'assurer qu'il n'y a pas de '..'
+            file_path = base_upload_dir / Path(file_path_from_db).name
+            
+            # ❗️ AJOUT: Vérification de sécurité
+            if not file_path.is_file() or not str(file_path.resolve()).startswith(str(base_upload_dir)):
+                raise FileNotFoundError(f"Invalid or non-existent file path: {file_path_from_db}")
+
             start_time = time.time()
             
             # 1. Obtenir la durée RÉELLE de l'audio original
@@ -148,7 +154,7 @@ class TranscriptionService:
 
             # 4. Transcription parallèle
             loop = asyncio.get_running_loop()
-            translate = False # (A-t-on besoin de ça ?) On le garde simple pour l'instant.
+            translate = False
             
             if len(segment_paths) == 1:
                 results = [await loop.run_in_executor(
@@ -217,8 +223,10 @@ class TranscriptionService:
             db.close()
             # Cleanup
             try:
-                # Ne pas supprimer le fichier original, seulement les fichiers traités
-                # file_path.unlink(missing_ok=True) # Fait par le dashboard ?
+                # ❗️ AJOUT: Supprimer le fichier original
+                if file_path and file_path.exists():
+                    file_path.unlink(missing_ok=True)
+                    
                 if processed_path and processed_path != file_path:
                     processed_path.unlink(missing_ok=True)
                 for seg_path in segment_paths:

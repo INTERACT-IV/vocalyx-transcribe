@@ -65,7 +65,8 @@ def setup_logging(log_level: str = "INFO", log_file: str = None):
         "uvicorn.access",
         "uvicorn.error",
         "faster_whisper",
-        "vocalyx"
+        "vocalyx",
+        "watchfiles" # ❗️ AJOUT (pour le setup normal)
     ]
     
     for logger_name in loggers_to_configure:
@@ -78,6 +79,9 @@ def setup_logging(log_level: str = "INFO", log_file: str = None):
             log.addHandler(handler)
         # Ne pas propager aux parents pour éviter les doublons
         log.propagate = False
+        
+    # ❗️ MODIFICATION: Mettre watchfiles à WARNING
+    logging.getLogger("watchfiles").setLevel(logging.WARNING)
     
     # Logger initial
     logger = logging.getLogger("vocalyx")
@@ -126,6 +130,12 @@ def get_uvicorn_log_config(log_level: str = "INFO"):
             "uvicorn.access": {
                 "handlers": ["default"],
                 "level": log_level.upper(),
+                "propagate": False
+            },
+            # ❗️ AJOUT: Masquer les logs INFO de watchfiles
+            "watchfiles": {
+                "handlers": ["default"],
+                "level": "WARNING", # On ne montrera que WARNING et plus
                 "propagate": False
             },
         },
@@ -194,13 +204,16 @@ def setup_colored_logging(log_level: str = "INFO", log_file: str = None):
     
     # Configurer les loggers spécifiques
     for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error", 
-                        "faster_whisper", "vocalyx"]:
+                        "faster_whisper", "vocalyx", "watchfiles"]: # ❗️ AJOUT
         log = logging.getLogger(logger_name)
         log.setLevel(numeric_level)
         log.handlers.clear()
         for handler in handlers:
             log.addHandler(handler)
         log.propagate = False
+        
+    # ❗️ MODIFICATION: Mettre watchfiles à WARNING
+    logging.getLogger("watchfiles").setLevel(logging.WARNING)
     
     logger = logging.getLogger("vocalyx")
     logger.info("✅ Logging coloré configuré")

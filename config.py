@@ -74,6 +74,10 @@ class Config:
             'colored': 'false'
         }
         
+        config['SECURITY'] = {
+            'internal_api_key': 'change_me_to_a_secure_secret_key'
+        }
+        
         with open(self.config_file, 'w') as f:
             config.write(f)
         
@@ -117,6 +121,18 @@ class Config:
         self.vad_threshold = self.config.getfloat('VAD', 'vad_threshold')
         self.vad_min_speech_duration_ms = self.config.getint('VAD', 'min_speech_duration_ms')
         self.vad_min_silence_duration_ms = self.config.getint('VAD', 'min_silence_duration_ms')
+        
+        # SECURITY
+        self.internal_api_key = self.config.get('SECURITY', 'internal_api_key', fallback=None)
+        if not self.internal_api_key or self.internal_api_key == 'change_me_to_a_secure_secret_key':
+            logging.warning("⚠️ Clé d'API interne non définie ou par défaut. Le worker n'est pas sécurisé.")
+            self.internal_api_key = None
+            
+        # ❗️ AJOUT: LOGGING (copié du dashboard)
+        self.log_level = self.config.get('LOGGING', 'level', fallback='INFO')
+        self.log_file_enabled = self.config.getboolean('LOGGING', 'file_enabled', fallback=True)
+        self.log_file_path = self.config.get('LOGGING', 'file_path', fallback='logs/vocalyx.log')
+        self.log_colored = self.config.getboolean('LOGGING', 'colored', fallback=False)
         
         # Créer les répertoires
         self.upload_dir.mkdir(exist_ok=True)

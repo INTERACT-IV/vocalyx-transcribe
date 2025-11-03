@@ -13,12 +13,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
-from sqlalchemy import func # ❗️ Ajout de func
+from sqlalchemy import func 
 
 from config import Config
 from database import Transcription
 from models.schemas import TranscriptionResult
-from api.dependencies import get_db
+from api.dependencies import get_db, verify_internal_access # ❗️ AJOUT
 
 config = Config()
 logger = logging.getLogger(__name__)
@@ -26,9 +26,10 @@ templates = Jinja2Templates(directory=config.templates_dir)
 
 router = APIRouter()
 
-@router.get("/transcribe/count", tags=["Transcriptions"])
+# ❗️ AJOUT: Appliquer la sécurité à tous les endpoints
+@router.get("/transcribe/count", tags=["Transcriptions"], dependencies=[Depends(verify_internal_access)])
 def get_transcription_count(
-    # ❗️ AJOUT DES FILTRES
+    # ... (les arguments restent les mêmes)
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     project_name: Optional[str] = Query(None, alias="project"),
@@ -37,9 +38,10 @@ def get_transcription_count(
     """
     Retourne le nombre total de transcriptions (filtré)
     et la répartition globale par statut.
+    (Endpoint interne, sécurisé)
     """
     
-    # 1. Requête pour les comptes filtrés (pour la pagination)
+    # ... (le code de la fonction reste le même)
     filtered_query = db.query(Transcription)
     if status:
         filtered_query = filtered_query.filter(Transcription.status == status)
@@ -50,7 +52,6 @@ def get_transcription_count(
     
     total_filtered_count = filtered_query.count()
 
-    # 2. Requête pour les comptes globaux (pour les stats du header)
     grouped_counts = (
         db.query(Transcription.status, func.count(Transcription.id))
         .group_by(Transcription.status)
@@ -73,8 +74,9 @@ def get_transcription_count(
             
     return result
 
-@router.get("/transcribe/recent", response_model=List[TranscriptionResult], tags=["Transcriptions"])
+@router.get("/transcribe/recent", response_model=List[TranscriptionResult], tags=["Transcriptions"], dependencies=[Depends(verify_internal_access)])
 def get_recent_transcriptions(
+    # ... (les arguments restent les mêmes)
     limit: int = Query(10, ge=1, le=100), 
     page: int = Query(1, ge=1),
     status: Optional[str] = Query(None),
@@ -84,7 +86,10 @@ def get_recent_transcriptions(
 ):
     """
     Récupère les transcriptions récentes avec filtres et pagination.
+    (Endpoint interne, sécurisé)
     """
+    
+    # ... (le code de la fonction reste le même)
     query = db.query(Transcription)
     
     if status:
@@ -117,12 +122,14 @@ def get_recent_transcriptions(
         })
     return results
 
-@router.get("/transcribe/{transcription_id}", response_model=TranscriptionResult, tags=["Transcriptions"])
+@router.get("/transcribe/{transcription_id}", response_model=TranscriptionResult, tags=["Transcriptions"], dependencies=[Depends(verify_internal_access)])
 def get_transcription(transcription_id: str, db: Session = Depends(get_db)):
+    """(Endpoint interne, sécurisé)"""
     entry = db.query(Transcription).filter(Transcription.id == transcription_id).first()
     if not entry:
         raise HTTPException(404, "Not found")
     
+    # ... (le code de la fonction reste le même)
     segments = json.loads(entry.segments) if entry.segments else []
     return {
         "id": entry.id,
@@ -141,8 +148,9 @@ def get_transcription(transcription_id: str, db: Session = Depends(get_db)):
         "finished_at": entry.finished_at.isoformat() if entry.finished_at else None,
     }
 
-@router.delete("/transcribe/{transcription_id}", tags=["Transcriptions"])
+@router.delete("/transcribe/{transcription_id}", tags=["Transcriptions"], dependencies=[Depends(verify_internal_access)])
 def delete_transcription(transcription_id: str, db: Session = Depends(get_db)):
+    """(Endpoint interne, sécurisé)"""
     entry = db.query(Transcription).filter(Transcription.id == transcription_id).first()
     if not entry:
         raise HTTPException(404, "Not found")
@@ -150,12 +158,13 @@ def delete_transcription(transcription_id: str, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "deleted", "id": transcription_id}
 
-@router.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])
+@router.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"], dependencies=[Depends(verify_internal_access)])
 def dashboard(request: Request, limit: int = 10, db: Session = Depends(get_db)):
+    """(Endpoint interne, sécurisé)"""
     entries = db.query(Transcription).order_by(Transcription.created_at.desc()).limit(limit).all()
     return templates.TemplateResponse("dashboard.html", {"request": request, "entries": entries})
 
-@router.get("/config", tags=["System"])
+@router.get("/config", tags=["System"], dependencies=[Depends(verify_internal_access)])
 def get_config():
     """Retourne la configuration actuelle (sans données sensibles)"""
     return {
@@ -180,7 +189,7 @@ def get_config():
         }
     }
 
-@router.post("/config/reload", tags=["System"])
+@router.post("/config/reload", tags=["System"], dependencies=[Depends(verify_internal_access)])
 def reload_config():
     """Recharge la configuration depuis le fichier"""
     try:
@@ -189,7 +198,7 @@ def reload_config():
     except Exception as e:
         raise HTTPException(500, f"Failed to reload config: {str(e)}")
 
-@router.get("/health", tags=["System"])
+@router.get("/health", tags=["System"], dependencies=[Depends(verify_internal_access)])
 def health_check(request: Request):
     """Modifié pour utiliser app.state"""
     service = request.app.state.transcription_service
@@ -202,18 +211,17 @@ def health_check(request: Request):
         "config_file": "config.ini"
     }
 
-@router.get("/worker/status", tags=["System"])
+@router.get("/worker/status", tags=["System"], dependencies=[Depends(verify_internal_access)])
 def get_worker_status(request: Request):
     """Endpoint de monitoring avancé"""
     service = request.app.state.transcription_service
     config = request.app.state.config
     
-    # Calcul du % d'utilisation
+    # ... (le code de la fonction reste le même)
     usage_percent = 0
     if config.max_workers > 0:
         usage_percent = round((service.active_tasks / config.max_workers) * 100, 1)
         
-    # Calcul Uptime
     uptime_seconds = (datetime.utcnow() - service.start_time).total_seconds()
     
     return {
@@ -223,12 +231,10 @@ def get_worker_status(request: Request):
         "active_tasks": service.active_tasks,
         "usage_percent": usage_percent,
         
-        # Stats machine
         "machine_name": platform.node(),
         "cpu_usage_percent": psutil.cpu_percent(),
         "memory_usage_percent": psutil.virtual_memory().percent,
         
-        # Stats cumulatives
         "start_time_utc": service.start_time.isoformat(),
         "uptime_seconds": uptime_seconds,
         "total_jobs_completed": service.total_jobs_completed,

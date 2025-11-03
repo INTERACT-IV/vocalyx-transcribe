@@ -7,7 +7,7 @@ import logging
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional # 👈 Importation ajoutée
+from typing import Optional 
 from fastapi import FastAPI, Request, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -22,17 +22,24 @@ from config import Config
 from database import engine, Base, Transcription, SessionLocal
 from api.endpoints import router as api_router
 from api.dependencies import get_db
-from logging_config import setup_logging, get_uvicorn_log_config
-from transcribe.transcription import TranscriptionService # 🆕 Import
+# ❗️ MODIFICATION: Import de setup_colored_logging
+from logging_config import setup_logging, get_uvicorn_log_config, setup_colored_logging
+from transcribe.transcription import TranscriptionService 
 
 # Initialiser la configuration
 config = Config()
 
-# Configurer le logging
-logger = setup_logging(
-    log_level=os.getenv("LOG_LEVEL", "INFO"),
-    log_file="logs/vocalyx.log" if not os.getenv("NO_LOG_FILE") else None
-)
+# ❗️ MODIFICATION: Logique de logging conditionnelle
+if config.log_colored:
+    logger = setup_colored_logging(
+        log_level=config.log_level,
+        log_file=config.log_file_path if config.log_file_enabled else None
+    )
+else:
+    logger = setup_logging(
+        log_level=config.log_level,
+        log_file=config.log_file_path if config.log_file_enabled else None
+    )
 
 # Créer les tables
 Base.metadata.create_all(bind=engine)
@@ -45,7 +52,6 @@ def find_and_lock_job(db: Session, worker_id: str) -> Optional[Transcription]:
     try:
         # Utilise une transaction pour le verrouillage
         with db.begin_nested():
-            # ❗️ CORRECTION ICI :
             # Tente de verrouiller la première tâche en attente (la plus ancienne)
             stmt = select(Transcription)\
                 .where(Transcription.status == 'pending')\
@@ -111,12 +117,12 @@ async def lifespan(app: FastAPI):
     # --- Startup ---
     logger.info("🚀 Démarrage de l'application Vocalyx (Worker)")
     
-    # 🆕 Initialiser le service et le stocker dans app.state
+    # Initialiser le service et le stocker dans app.state
     service = TranscriptionService(config)
     app.state.transcription_service = service
     app.state.config = config
     
-    # 🆕 Démarrer la boucle du worker
+    # Démarrer la boucle du worker
     app.state.worker_task = asyncio.create_task(worker_loop(app))
     
     yield  # --- App runs here ---
@@ -152,14 +158,15 @@ def root(request: Request):
     return HTMLResponse('<html><body><h1>Vocalyx Worker</h1><a href="/docs">API Docs</a></body></html>')
 
 # La route /dashboard n'est plus la route principale de ce service
-@app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])
+@app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"], dependencies=[Depends(get_db)])
 def dashboard(request: Request, limit: int = 10, db: Session = Depends(get_db)):
     entries = db.query(Transcription).order_by(Transcription.created_at.desc()).limit(limit).all()
     return templates.TemplateResponse("dashboard.html", {"request": request, "entries": entries})
 
 if __name__ == "__main__":
+    # ❗️ MODIFICATION: Utilisation de config.log_level
     log_config = get_uvicorn_log_config(
-        log_level=os.getenv("LOG_LEVEL", "INFO")
+        log_level=config.log_level 
     )
     
     uvicorn.run(
