@@ -55,6 +55,9 @@ celery_app.conf.update(
     # Retry
     task_acks_late=True,  # Acquitter la tâche seulement après succès
     task_reject_on_worker_lost=True,  # Re-enqueue si le worker crash
+
+    # Connexion
+    broker_connection_retry_on_startup=True,
     
     # Monitoring
     worker_send_task_events=True,

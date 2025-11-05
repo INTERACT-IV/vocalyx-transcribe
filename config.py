@@ -147,7 +147,10 @@ class Config:
         self.temperature = self.config.getfloat('PERFORMANCE', 'temperature')
         
         # PATHS
-        self.upload_dir = Path(self.config.get('PATHS', 'upload_dir'))
+        self.upload_dir = Path(os.environ.get(
+            'UPLOAD_DIR',
+            self.config.get('PATHS', 'upload_dir')
+        ))
         
         # VAD
         self.vad_min_silence_len = self.config.getint('VAD', 'min_silence_len')
@@ -171,7 +174,10 @@ class Config:
             self.config.get('LOGGING', 'level', fallback='INFO')
         )
         self.log_file_enabled = self.config.getboolean('LOGGING', 'file_enabled', fallback=True)
-        self.log_file_path = self.config.get('LOGGING', 'file_path', fallback='logs/vocalyx-transcribe.log')
+        self.log_file_path = os.environ.get(
+            'LOG_FILE_PATH',
+            self.config.get('LOGGING', 'file_path', fallback='logs/vocalyx-transcribe.log')
+        )
         
         log_colored_str = os.environ.get(
             'LOG_COLORED', 
