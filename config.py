@@ -89,27 +89,60 @@ class Config:
         """Charge les paramètres dans des attributs"""
         
         # CORE
-        self.instance_name = self.config.get('CORE', 'instance_name', fallback=f"worker-{os.getpid()}")
+        self.instance_name = os.environ.get(
+            'INSTANCE_NAME', 
+            self.config.get('CORE', 'instance_name', fallback=f"worker-{os.getpid()}")
+        )
         
         # API
-        self.api_url = self.config.get('API', 'url')
+        self.api_url = os.environ.get(
+            'VOCALYX_API_URL', 
+            self.config.get('API', 'url')
+        )
         self.api_timeout = self.config.getint('API', 'timeout', fallback=60)
         
         # CELERY
-        self.celery_broker_url = self.config.get('CELERY', 'broker_url')
-        self.celery_result_backend = self.config.get('CELERY', 'result_backend')
+        self.celery_broker_url = os.environ.get(
+            'CELERY_BROKER_URL', 
+            self.config.get('CELERY', 'broker_url')
+        )
+        self.celery_result_backend = os.environ.get(
+            'CELERY_RESULT_BACKEND', 
+            self.config.get('CELERY', 'result_backend')
+        )
         
         # WHISPER
-        self.model = self.config.get('WHISPER', 'model')
-        self.device = self.config.get('WHISPER', 'device')
-        self.compute_type = self.config.get('WHISPER', 'compute_type')
+        self.model = os.environ.get(
+            'WHISPER_MODEL', 
+            self.config.get('WHISPER', 'model')
+        )
+        self.device = os.environ.get(
+            'WHISPER_DEVICE', 
+            self.config.get('WHISPER', 'device')
+        )
+        self.compute_type = os.environ.get(
+            'WHISPER_COMPUTE_TYPE', 
+            self.config.get('WHISPER', 'compute_type')
+        )
         self.cpu_threads = self.config.getint('WHISPER', 'cpu_threads')
-        self.language = self.config.get('WHISPER', 'language')
+        self.language = os.environ.get(
+            'WHISPER_LANGUAGE', 
+            self.config.get('WHISPER', 'language')
+        )
         
         # PERFORMANCE
-        self.max_workers = self.config.getint('PERFORMANCE', 'max_workers')
+        self.max_workers = os.environ.get(
+            'MAX_WORKERS', 
+            self.config.getint('PERFORMANCE', 'max_workers')
+        )
         self.segment_length_ms = self.config.getint('PERFORMANCE', 'segment_length_ms')
-        self.vad_enabled = self.config.getboolean('PERFORMANCE', 'vad_enabled')
+        
+        vad_enabled_str = os.environ.get(
+            'VAD_ENABLED', 
+            self.config.get('PERFORMANCE', 'vad_enabled')
+        )
+        self.vad_enabled = vad_enabled_str.lower() in ['true', '1', 't']
+        
         self.beam_size = self.config.getint('PERFORMANCE', 'beam_size')
         self.temperature = self.config.getfloat('PERFORMANCE', 'temperature')
         
@@ -124,16 +157,27 @@ class Config:
         self.vad_min_silence_duration_ms = self.config.getint('VAD', 'min_silence_duration_ms')
         
         # SECURITY
-        self.internal_api_key = self.config.get('SECURITY', 'internal_api_key')
+        self.internal_api_key = os.environ.get(
+            'INTERNAL_API_KEY', 
+            self.config.get('SECURITY', 'internal_api_key')
+        )
         
         if self.internal_api_key == 'CHANGE_ME_SECRET_INTERNAL_KEY_12345':
             logging.warning("⚠️ SECURITY: Internal API key is using default value. Please change it!")
         
         # LOGGING
-        self.log_level = self.config.get('LOGGING', 'level', fallback='INFO')
+        self.log_level = os.environ.get(
+            'LOG_LEVEL', 
+            self.config.get('LOGGING', 'level', fallback='INFO')
+        )
         self.log_file_enabled = self.config.getboolean('LOGGING', 'file_enabled', fallback=True)
         self.log_file_path = self.config.get('LOGGING', 'file_path', fallback='logs/vocalyx-transcribe.log')
-        self.log_colored = self.config.getboolean('LOGGING', 'colored', fallback=True)
+        
+        log_colored_str = os.environ.get(
+            'LOG_COLORED', 
+            self.config.get('LOGGING', 'colored', fallback='true')
+        )
+        self.log_colored = log_colored_str.lower() in ['true', '1', 't']
     
     def reload(self):
         """Recharge la configuration depuis le fichier"""
