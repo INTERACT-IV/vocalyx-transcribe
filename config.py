@@ -1,5 +1,6 @@
 """
-Gestion de la configuration de l'application
+vocalyx-transcribe/config.py
+Configuration du worker (adapté pour l'architecture microservices)
 """
 
 import os
@@ -15,7 +16,6 @@ class Config:
         self.config = configparser.ConfigParser()
         self.config_file = config_file
         
-        # Créer config par défaut si n'existe pas
         if not os.path.exists(config_file):
             self._create_default_config()
         
@@ -25,37 +25,39 @@ class Config:
     def _create_default_config(self):
         """Crée un fichier de configuration par défaut"""
         config = configparser.ConfigParser()
-
+        
         config['CORE'] = {
             'instance_name': 'worker-01'
         }
         
+        config['API'] = {
+            'url': 'http://localhost:8000',
+            'timeout': '60'
+        }
+        
+        config['CELERY'] = {
+            'broker_url': 'redis://localhost:6379/0',
+            'result_backend': 'redis://localhost:6379/0'
+        }
+        
         config['WHISPER'] = {
-            'model': 'small',
+            'model': './models/openai-whisper-small',
             'device': 'cpu',
             'compute_type': 'int8',
-            'cpu_threads': '10',
+            'cpu_threads': '8',
             'language': 'fr'
         }
         
         config['PERFORMANCE'] = {
             'max_workers': '2',
-            'segment_length_ms': '60000',
+            'segment_length_ms': '45000',
             'vad_enabled': 'true',
             'beam_size': '5',
             'temperature': '0.0'
         }
         
-        config['LIMITS'] = {
-            'max_file_size_mb': '100',
-            'rate_limit_per_minute': '10',
-            'allowed_extensions': 'wav,mp3,m4a,flac,ogg,webm'
-        }
-        
         config['PATHS'] = {
-            'upload_dir': './tmp_uploads',
-            'database_path': 'sqlite:///./transcriptions.db',
-            'templates_dir': 'templates'
+            'upload_dir': './shared_uploads'
         }
         
         config['VAD'] = {
@@ -70,12 +72,12 @@ class Config:
         config['LOGGING'] = {
             'level': 'INFO',
             'file_enabled': 'true',
-            'file_path': 'logs/vocalyx.log',
-            'colored': 'false'
+            'file_path': 'logs/vocalyx-transcribe.log',
+            'colored': 'true'
         }
         
         config['SECURITY'] = {
-            'internal_api_key': 'change_me_to_a_secure_secret_key'
+            'internal_api_key': 'CHANGE_ME_SECRET_INTERNAL_KEY_12345'
         }
         
         with open(self.config_file, 'w') as f:
@@ -85,10 +87,18 @@ class Config:
     
     def _load_settings(self):
         """Charge les paramètres dans des attributs"""
-
+        
         # CORE
         self.instance_name = self.config.get('CORE', 'instance_name', fallback=f"worker-{os.getpid()}")
-
+        
+        # API
+        self.api_url = self.config.get('API', 'url')
+        self.api_timeout = self.config.getint('API', 'timeout', fallback=60)
+        
+        # CELERY
+        self.celery_broker_url = self.config.get('CELERY', 'broker_url')
+        self.celery_result_backend = self.config.get('CELERY', 'result_backend')
+        
         # WHISPER
         self.model = self.config.get('WHISPER', 'model')
         self.device = self.config.get('WHISPER', 'device')
@@ -103,17 +113,8 @@ class Config:
         self.beam_size = self.config.getint('PERFORMANCE', 'beam_size')
         self.temperature = self.config.getfloat('PERFORMANCE', 'temperature')
         
-        # LIMITS
-        self.max_file_size_mb = self.config.getint('LIMITS', 'max_file_size_mb')
-        self.rate_limit = self.config.getint('LIMITS', 'rate_limit_per_minute')
-        self.allowed_extensions: Set[str] = set(
-            ext.strip() for ext in self.config.get('LIMITS', 'allowed_extensions').split(',')
-        )
-        
         # PATHS
         self.upload_dir = Path(self.config.get('PATHS', 'upload_dir'))
-        self.database_path = self.config.get('PATHS', 'database_path')
-        self.templates_dir = self.config.get('PATHS', 'templates_dir')
         
         # VAD
         self.vad_min_silence_len = self.config.getint('VAD', 'min_silence_len')
@@ -123,19 +124,16 @@ class Config:
         self.vad_min_silence_duration_ms = self.config.getint('VAD', 'min_silence_duration_ms')
         
         # SECURITY
-        self.internal_api_key = self.config.get('SECURITY', 'internal_api_key', fallback=None)
-        if not self.internal_api_key or self.internal_api_key == 'change_me_to_a_secure_secret_key':
-            logging.warning("⚠️ Clé d'API interne non définie ou par défaut. Le worker n'est pas sécurisé.")
-            self.internal_api_key = None
-            
-        # ❗️ AJOUT: LOGGING (copié du dashboard)
+        self.internal_api_key = self.config.get('SECURITY', 'internal_api_key')
+        
+        if self.internal_api_key == 'CHANGE_ME_SECRET_INTERNAL_KEY_12345':
+            logging.warning("⚠️ SECURITY: Internal API key is using default value. Please change it!")
+        
+        # LOGGING
         self.log_level = self.config.get('LOGGING', 'level', fallback='INFO')
         self.log_file_enabled = self.config.getboolean('LOGGING', 'file_enabled', fallback=True)
-        self.log_file_path = self.config.get('LOGGING', 'file_path', fallback='logs/vocalyx.log')
-        self.log_colored = self.config.getboolean('LOGGING', 'colored', fallback=False)
-        
-        # Créer les répertoires
-        self.upload_dir.mkdir(exist_ok=True)
+        self.log_file_path = self.config.get('LOGGING', 'file_path', fallback='logs/vocalyx-transcribe.log')
+        self.log_colored = self.config.getboolean('LOGGING', 'colored', fallback=True)
     
     def reload(self):
         """Recharge la configuration depuis le fichier"""
