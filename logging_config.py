@@ -66,7 +66,9 @@ def setup_logging(log_level: str = "INFO", log_file: str = None):
         "uvicorn.error",
         "faster_whisper",
         "vocalyx",
-        "watchfiles" # ❗️ AJOUT (pour le setup normal)
+        "watchfiles",
+        "celery",       # <-- MODIFICATION AJOUTÉE
+        "celery.task"   # <-- MODIFICATION AJOUTÉE
     ]
     
     for logger_name in loggers_to_configure:
@@ -204,7 +206,10 @@ def setup_colored_logging(log_level: str = "INFO", log_file: str = None):
     
     # Configurer les loggers spécifiques
     for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error", 
-                        "faster_whisper", "vocalyx", "watchfiles"]: # ❗️ AJOUT
+                        "faster_whisper", "vocalyx", "watchfiles",
+                        "celery",       # <-- MODIFICATION AJOUTÉE
+                        "celery.task"   # <-- MODIFICATION AJOUTÉE
+                       ]:
         log = logging.getLogger(logger_name)
         log.setLevel(numeric_level)
         log.handlers.clear()

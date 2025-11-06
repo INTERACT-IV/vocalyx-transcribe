@@ -9,11 +9,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from faster_whisper import WhisperModel
 from audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
-from timeout_utils import timeout, TimeoutError
 
-import signal
-from contextlib import contextmanager
-
+# Imports non utilisés (TimeoutError, signal, contextmanager) supprimés
 logger = logging.getLogger(__name__)
 
 class TranscriptionService:
@@ -57,19 +54,21 @@ class TranscriptionService:
         
         segments_list = []
         text_full = ""
+        segments_list_raw = [] # Initialiser ici
+        info = None # Initialiser info
         
         logger.info(f"🎯 Starting Whisper transcription (VAD: {use_vad})...")
         
         try:
             vad_params = None
             if use_vad:
-                vad_params = {
-                    "threshold": 0.5,
-                    "min_speech_duration_ms": 250,
-                    "max_speech_duration_s": float('inf'),
-                    "min_silence_duration_ms": 2000,
-                    "speech_pad_ms": 400
-                }
+                # Utiliser les paramètres VAD de la config (plus cohérent)
+                vad_params = dict(
+                    threshold=self.config.vad_threshold,
+                    min_speech_duration_ms=self.config.vad_min_speech_duration_ms,
+                    min_silence_duration_ms=self.config.vad_min_silence_duration_ms,
+                    speech_pad_ms=self.config.vad_speech_pad_ms
+                )
             
             segments, info = self.model.transcribe(
                 str(file_path),
@@ -86,48 +85,30 @@ class TranscriptionService:
             
             logger.info(f"🎯 Whisper inference completed, consuming generator...")
             
-            # ✅ NOUVELLE APPROCHE : Consommer progressivement avec timeout global
-            segments_list_raw = []
+            # --- MODIFICATION ---
+            # Remplacer la boucle progressive par une consommation directe.
+            # Le "lazy loading" dans worker.py a corrigé le blocage.
             start_consume_time = time.time()
-            timeout_seconds = 300  # 5 minutes max
-            segment_count = 0
-            
-            logger.info(f"📝 Consuming generator progressively (timeout: {timeout_seconds}s)...")
-            logger.info(f"⏱Segments {segments}")
-            logger.info(f"⏱lenSegments {len(segments)}")
-            logger.info(f"⏱Info {info}")
-            for seg in segments:
-                # Vérifier le timeout à chaque itération
-                elapsed = time.time() - start_consume_time
-                if elapsed > timeout_seconds:
-                    raise TimeoutError(f"Generator consumption exceeded {timeout_seconds}s")
-                
-                segments_list_raw.append(seg)
-                segment_count += 1
-                
-                # Log tous les 5 segments
-                if segment_count % 5 == 0:
-                    logger.info(f"📝 Consumed {segment_count} segments (elapsed: {elapsed:.1f}s)")
-            
+            segments_list_raw = list(segments) # Force l'évaluation complète
             consume_time = time.time() - start_consume_time
             logger.info(f"✅ Generator consumed, got {len(segments_list_raw)} segments in {consume_time:.1f}s")
+            # --- FIN MODIFICATION ---
             
-        except TimeoutError as e:
-            logger.error(f"❌ Timeout while consuming generator: {e}")
+        except Exception as e:
+            # Gérer les erreurs de transcription ou de consommation
+            logger.error(f"❌ Error during transcription/consumption: {e}", exc_info=True)
             
             if use_vad and retry_without_vad:
                 logger.warning(f"⚠️ Retrying WITHOUT VAD...")
                 return self.transcribe_segment(file_path, use_vad=False, retry_without_vad=False)
             else:
-                raise Exception(f"Generator consumption timed out: {e}")
+                raise Exception(f"Transcription failed: {e}")
         
-        except StopIteration:
-            logger.info(f"✅ Generator exhausted normally")
-        
-        except Exception as e:
-            logger.error(f"❌ Error during transcription: {e}", exc_info=True)
-            raise
-        
+        # S'assurer que 'info' a été défini
+        if info is None:
+            logger.error("❌ 'info' n'a pas été retourné par model.transcribe(), impossible de détecter la langue.")
+            raise Exception("Transcription failed: 'info' object is None")
+
         # Convertir les segments en dictionnaires
         logger.info(f"📝 Converting {len(segments_list_raw)} segments to dict...")
         
@@ -186,7 +167,7 @@ class TranscriptionService:
             # 3. Découpe intelligente (si nécessaire)
             segment_paths = split_audio_intelligent(
                 processed_path,
-                use_vad=use_vad  # ← Passer le paramètre correct
+                use_vad=use_vad
             )
             logger.info(f"🔪 Created {len(segment_paths)} segment(s)")
             
@@ -199,7 +180,6 @@ class TranscriptionService:
             for i, segment_path in enumerate(segment_paths):
                 logger.info(f"🎤 Transcribing segment {i+1}/{len(segment_paths)}...")
                 
-                # ✅ CORRECTION : Passer le paramètre use_vad
                 text, segments_list, lang = self.transcribe_segment(segment_path, use_vad=use_vad)
                 
                 # Ajuster les timestamps avec l'offset

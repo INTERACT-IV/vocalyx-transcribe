@@ -10,7 +10,8 @@ from config import Config
 from transcription_service import TranscriptionService
 from api_client import VocalyxAPIClient
 
-# Initialiser la configuration
+# --- MODIFICATION 1 : Initialiser SEULEMENT la config ---
+# La config est un objet simple, sans danger pour le 'fork'
 config = Config()
 
 # Configurer le logging
@@ -27,11 +28,30 @@ else:
         log_file=config.log_file_path if config.log_file_enabled else None
     )
 
-# Initialiser le client API
-api_client = VocalyxAPIClient(config)
+# --- MODIFICATION 2 : Déclarer les services comme 'None' ---
+# Ils seront initialisés "paresseusement" par chaque worker.
+_api_client = None
+_transcription_service = None
 
-# Initialiser le service de transcription
-transcription_service = TranscriptionService(config)
+def get_api_client():
+    """Charge le client API (une fois par worker)"""
+    global _api_client
+    if _api_client is None:
+        logger.info(f"Initialisation du client API pour ce worker ({config.instance_name})...")
+        _api_client = VocalyxAPIClient(config)
+    return _api_client
+
+def get_transcription_service():
+    """Charge le service de transcription (une fois par worker)"""
+    global _transcription_service
+    if _transcription_service is None:
+        logger.info(f"Initialisation du TranscriptionService pour ce worker ({config.instance_name})...")
+        _transcription_service = TranscriptionService(config)
+        logger.info("Service de transcription (et modèle Whisper) chargé.")
+    return _transcription_service
+
+# --- FIN DES MODIFICATIONS GLOBALES ---
+
 
 # Créer l'application Celery (connexion au même broker que vocalyx-api)
 celery_app = Celery(
@@ -40,58 +60,51 @@ celery_app = Celery(
     backend=config.celery_result_backend
 )
 
-# Configuration de Celery
+# ... (votre configuration Celery conf.update reste inchangée) ...
 celery_app.conf.update(
     task_serializer='json',
     accept_content=['json'],
     result_serializer='json',
     timezone='UTC',
     enable_utc=True,
-    
-    # Performance
-    worker_prefetch_multiplier=1,  # Prendre 1 tâche à la fois (équitable entre workers)
-    worker_max_tasks_per_child=10,  # Redémarrer après 10 tâches (libère RAM/VRAM)
-    
-    # Retry
-    task_acks_late=True,  # Acquitter la tâche seulement après succès
-    task_reject_on_worker_lost=True,  # Re-enqueue si le worker crash
-
-    # Connexion
+    worker_prefetch_multiplier=1,
+    worker_max_tasks_per_child=10,
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
     broker_connection_retry_on_startup=True,
-    
-    # Monitoring
     worker_send_task_events=True,
     task_send_sent_event=True,
 )
+
 
 @celery_app.task(
     bind=True,
     name='transcribe_audio',
     max_retries=3,
     default_retry_delay=60,
-    soft_time_limit=1800,    # 30 minutes (soft)
-    time_limit=2100,         # 35 minutes (hard)
+    soft_time_limit=1800,
+    time_limit=2100,
     acks_late=True,
     reject_on_worker_lost=True
 )
 def transcribe_audio_task(self, transcription_id: str):
     """
     Tâche de transcription exécutée par le worker.
-    
-    Cette tâche est définie dans vocalyx-api mais EXÉCUTÉE ici.
-    
-    Args:
-        self: Instance de la tâche (bind=True)
-        transcription_id: ID de la transcription à traiter
-        
-    Returns:
-        dict: Résultat de la transcription
     """
     
     logger.info(f"[{transcription_id}] 🎯 Task started by worker {config.instance_name}")
     start_time = time.time()
     
     try:
+        # --- MODIFICATION 3 : Récupérer les services via les "getters" ---
+        try:
+            api_client = get_api_client()
+            transcription_service = get_transcription_service()
+        except Exception as e:
+            logger.error(f"[{transcription_id}] ❌ Erreur critique lors de l'initialisation du service: {e}", exc_info=True)
+            raise self.retry(exc=e)
+        # --- FIN MODIFICATION ---
+
         # 1. Récupérer les informations de la transcription depuis l'API
         logger.info(f"[{transcription_id}] 📡 Fetching transcription data from API...")
         transcription = api_client.get_transcription(transcription_id)
@@ -113,12 +126,15 @@ def transcribe_audio_task(self, transcription_id: str):
         
         # 3. Exécuter la transcription
         logger.info(f"[{transcription_id}] 🎤 Starting transcription with Whisper...")
+        
+        # Le 'transcription_service' est maintenant propre à ce worker,
+        # la boucle sur le générateur ne devrait plus bloquer.
         result = transcription_service.transcribe(
             file_path=file_path,
             use_vad=use_vad
         )
         
-        logger.info(f"[{transcription_id}] ✅ Transcription service completed")  # ← AJOUTER
+        logger.info(f"[{transcription_id}] ✅ Transcription service completed")
         
         processing_time = round(time.time() - start_time, 2)
         
@@ -130,7 +146,7 @@ def transcribe_audio_task(self, transcription_id: str):
         )
         
         # 4. Mettre à jour avec les résultats
-        logger.info(f"[{transcription_id}] 💾 Saving results to API...")  # ← AJOUTER
+        logger.info(f"[{transcription_id}] 💾 Saving results to API...")
         import json
         api_client.update_transcription(transcription_id, {
             "status": "done",
@@ -163,7 +179,9 @@ def transcribe_audio_task(self, transcription_id: str):
         
         # Mettre à jour le statut à "error"
         try:
-            api_client.update_transcription(transcription_id, {
+            # Ré-obtenir le client au cas où il aurait été perdu
+            api_client_on_error = get_api_client()
+            api_client_on_error.update_transcription(transcription_id, {
                 "status": "error",
                 "error_message": str(e)
             })
@@ -184,22 +202,9 @@ def transcribe_audio_task(self, transcription_id: str):
         }
 
 if __name__ == "__main__":
-    """
-    Lancement du worker depuis la ligne de commande.
-    
-    Usage:
-        python worker.py
-        
-    Ou avec Celery directement:
-        celery -A worker.celery_app worker --loglevel=info --concurrency=2
-    """
+    # ... (Le reste de votre fichier __main__ est parfait et n'a pas besoin d'être modifié) ...
     logger.info(f"🚀 Starting Celery worker: {config.instance_name}")
-    logger.info(f"📊 Model: {config.model} | Device: {config.device}")
-    logger.info(f"⚙️ Max Workers: {config.max_workers} | VAD: {config.vad_enabled}")
-    logger.info(f"🔗 Broker: {config.celery_broker_url}")
-    logger.info(f"📡 API: {config.api_url}")
-    
-    # Lancer le worker
+    # ...
     celery_app.worker_main([
         'worker',
         f'--loglevel={config.log_level.lower()}',
