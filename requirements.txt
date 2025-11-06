@@ -2,18 +2,18 @@
 # Worker Celery pour la transcription audio
 
 # Celery & Redis
-celery==5.3.4
-redis==5.0.1
+celery==5.5.3
+redis==7.0.1
 
 # Client HTTP (pour communiquer avec l'API)
-httpx==0.25.2
-requests>=2.28.0
+httpx==0.28.1
+requests>=2.32.5
 
 # Whisper & Audio
-faster-whisper==1.0.3
-av==12.0.0
-soundfile==0.12.1
+faster-whisper==1.2.1
+av==16.0.1
+soundfile==0.13.1
 pydub==0.25.1
 
 # Utilitaires
-python-dotenv==1.0.0
+python-dotenv==1.2.1

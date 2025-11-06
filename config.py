@@ -153,11 +153,10 @@ class Config:
         ))
         
         # VAD
-        self.vad_min_silence_len = self.config.getint('VAD', 'min_silence_len')
-        self.vad_silence_thresh = self.config.getint('VAD', 'silence_thresh')
-        self.vad_threshold = self.config.getfloat('VAD', 'vad_threshold')
-        self.vad_min_speech_duration_ms = self.config.getint('VAD', 'min_speech_duration_ms')
-        self.vad_min_silence_duration_ms = self.config.getint('VAD', 'min_silence_duration_ms')
+        self.vad_threshold = self.config.getfloat('VAD', 'threshold', fallback=0.5)
+        self.vad_min_speech_duration_ms = self.config.getint('VAD', 'min_speech_duration_ms', fallback=250)
+        self.vad_min_silence_duration_ms = self.config.getint('VAD', 'min_silence_duration_ms', fallback=2000)
+        self.vad_speech_pad_ms = self.config.getint('VAD', 'speech_pad_ms', fallback=400)
         
         # SECURITY
         self.internal_api_key = os.environ.get(

@@ -68,7 +68,11 @@ celery_app.conf.update(
     bind=True,
     name='transcribe_audio',
     max_retries=3,
-    default_retry_delay=60
+    default_retry_delay=60,
+    soft_time_limit=1800,    # 30 minutes (soft)
+    time_limit=2100,         # 35 minutes (hard)
+    acks_late=True,
+    reject_on_worker_lost=True
 )
 def transcribe_audio_task(self, transcription_id: str):
     """
@@ -114,6 +118,8 @@ def transcribe_audio_task(self, transcription_id: str):
             use_vad=use_vad
         )
         
+        logger.info(f"[{transcription_id}] ✅ Transcription service completed")  # ← AJOUTER
+        
         processing_time = round(time.time() - start_time, 2)
         
         logger.info(
@@ -124,6 +130,7 @@ def transcribe_audio_task(self, transcription_id: str):
         )
         
         # 4. Mettre à jour avec les résultats
+        logger.info(f"[{transcription_id}] 💾 Saving results to API...")  # ← AJOUTER
         import json
         api_client.update_transcription(transcription_id, {
             "status": "done",

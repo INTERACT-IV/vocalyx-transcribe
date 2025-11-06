@@ -10,7 +10,29 @@ from typing import Dict, List, Tuple
 from faster_whisper import WhisperModel
 from audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
 
+import signal
+from contextlib import contextmanager
+
 logger = logging.getLogger(__name__)
+
+class TimeoutException(Exception):
+    pass
+
+@contextmanager
+def timeout(seconds):
+    """Context manager pour timeout"""
+    def signal_handler(signum, frame):
+        raise TimeoutException(f"Operation timed out after {seconds} seconds")
+    
+    # Set the signal handler
+    old_handler = signal.signal(signal.SIGALRM, signal_handler)
+    signal.alarm(seconds)
+    
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 class TranscriptionService:
     """
@@ -43,7 +65,7 @@ class TranscriptionService:
         
         logger.info(f"✅ Whisper model loaded successfully")
         logger.info(f"⚙️ VAD: {self.config.vad_enabled} | Beam size: {self.config.beam_size}")
-    
+        
     def transcribe_segment(self, file_path: Path) -> Tuple[str, List[Dict], str]:
         """
         Transcrit un segment audio.
@@ -60,6 +82,19 @@ class TranscriptionService:
         segments_list = []
         text_full = ""
         
+        logger.info(f"🎯 Starting Whisper transcription...")
+        
+        # ✅ MODIFICATION : Nouveaux paramètres VAD pour faster-whisper 1.1.0+
+        vad_params = None
+        if self.config.vad_enabled:
+            vad_params = {
+                "threshold": getattr(self.config, 'vad_threshold', 0.5),
+                "min_speech_duration_ms": getattr(self.config, 'vad_min_speech_duration_ms', 250),
+                "max_speech_duration_s": float('inf'),
+                "min_silence_duration_ms": getattr(self.config, 'vad_min_silence_duration_ms', 2000),
+                "speech_pad_ms": 400
+            }
+        
         # Transcription avec Whisper
         segments, info = self.model.transcribe(
             str(file_path),
@@ -69,23 +104,41 @@ class TranscriptionService:
             best_of=self.config.beam_size,
             temperature=self.config.temperature,
             vad_filter=self.config.vad_enabled,
-            vad_parameters=dict(
-                threshold=self.config.vad_threshold,
-                min_speech_duration_ms=self.config.vad_min_speech_duration_ms,
-                min_silence_duration_ms=self.config.vad_min_silence_duration_ms
-            ) if self.config.vad_enabled else None,
+            vad_parameters=vad_params,  # ← Utiliser les nouveaux paramètres
             word_timestamps=False,
-            condition_on_previous_text=True,
+            condition_on_previous_text=False,  # ← Désactiver pour éviter les bugs
         )
         
-        # Convertir les segments en liste de dictionnaires
-        for seg in segments:
-            segments_list.append({
-                "start": round(seg.start, 2),
-                "end": round(seg.end, 2),
-                "text": seg.text.strip()
-            })
-            text_full += seg.text.strip() + " "
+        logger.info(f"🎯 Whisper transcription completed, processing segments...")
+        
+        # Convertir le générateur en liste avec logs détaillés
+        try:
+            logger.info(f"📝 Converting generator to list...")
+            segments_list_raw = list(segments)
+            logger.info(f"✅ Generator consumed, got {len(segments_list_raw)} segments")
+        except Exception as e:
+            logger.error(f"❌ Error consuming segments generator: {e}")
+            raise
+        
+        # Convertir les segments en dictionnaires
+        for i, seg in enumerate(segments_list_raw):
+            try:
+                segments_list.append({
+                    "start": round(seg.start, 2),
+                    "end": round(seg.end, 2),
+                    "text": seg.text.strip()
+                })
+                text_full += seg.text.strip() + " "
+                
+                # Log progressif tous les 10 segments
+                if (i + 1) % 10 == 0:
+                    logger.info(f"📝 Processed {i + 1}/{len(segments_list_raw)} segments")
+                    
+            except Exception as e:
+                logger.error(f"❌ Error processing segment {i}: {e}")
+                continue
+        
+        logger.info(f"✅ All {len(segments_list)} segments processed")
         
         return text_full.strip(), segments_list, info.language
     
