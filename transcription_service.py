@@ -9,30 +9,12 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from faster_whisper import WhisperModel
 from audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
+from timeout_utils import timeout, TimeoutError
 
 import signal
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
-
-class TimeoutException(Exception):
-    pass
-
-@contextmanager
-def timeout(seconds):
-    """Context manager pour timeout"""
-    def signal_handler(signum, frame):
-        raise TimeoutException(f"Operation timed out after {seconds} seconds")
-    
-    # Set the signal handler
-    old_handler = signal.signal(signal.SIGALRM, signal_handler)
-    signal.alarm(seconds)
-    
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
 
 class TranscriptionService:
     """
@@ -66,15 +48,9 @@ class TranscriptionService:
         logger.info(f"✅ Whisper model loaded successfully")
         logger.info(f"⚙️ VAD: {self.config.vad_enabled} | Beam size: {self.config.beam_size}")
         
-    def transcribe_segment(self, file_path: Path) -> Tuple[str, List[Dict], str]:
+    def transcribe_segment(self, file_path: Path, use_vad: bool = True, retry_without_vad: bool = True) -> Tuple[str, List[Dict], str]:
         """
-        Transcrit un segment audio.
-        
-        Args:
-            file_path: Chemin vers le fichier audio
-            
-        Returns:
-            tuple: (texte, segments, langue)
+        Transcrit un segment audio avec consommation progressive du générateur.
         """
         if self.model is None:
             raise RuntimeError("Whisper model not loaded")
@@ -82,45 +58,79 @@ class TranscriptionService:
         segments_list = []
         text_full = ""
         
-        logger.info(f"🎯 Starting Whisper transcription...")
+        logger.info(f"🎯 Starting Whisper transcription (VAD: {use_vad})...")
         
-        # ✅ MODIFICATION : Nouveaux paramètres VAD pour faster-whisper 1.1.0+
-        vad_params = None
-        if self.config.vad_enabled:
-            vad_params = {
-                "threshold": getattr(self.config, 'vad_threshold', 0.5),
-                "min_speech_duration_ms": getattr(self.config, 'vad_min_speech_duration_ms', 250),
-                "max_speech_duration_s": float('inf'),
-                "min_silence_duration_ms": getattr(self.config, 'vad_min_silence_duration_ms', 2000),
-                "speech_pad_ms": 400
-            }
-        
-        # Transcription avec Whisper
-        segments, info = self.model.transcribe(
-            str(file_path),
-            language=self.config.language or None,
-            task="transcribe",
-            beam_size=self.config.beam_size,
-            best_of=self.config.beam_size,
-            temperature=self.config.temperature,
-            vad_filter=self.config.vad_enabled,
-            vad_parameters=vad_params,  # ← Utiliser les nouveaux paramètres
-            word_timestamps=False,
-            condition_on_previous_text=False,  # ← Désactiver pour éviter les bugs
-        )
-        
-        logger.info(f"🎯 Whisper transcription completed, processing segments...")
-        
-        # Convertir le générateur en liste avec logs détaillés
         try:
-            logger.info(f"📝 Converting generator to list...")
-            segments_list_raw = list(segments)
-            logger.info(f"✅ Generator consumed, got {len(segments_list_raw)} segments")
+            vad_params = None
+            if use_vad:
+                vad_params = {
+                    "threshold": 0.5,
+                    "min_speech_duration_ms": 250,
+                    "max_speech_duration_s": float('inf'),
+                    "min_silence_duration_ms": 2000,
+                    "speech_pad_ms": 400
+                }
+            
+            segments, info = self.model.transcribe(
+                str(file_path),
+                language=self.config.language or None,
+                task="transcribe",
+                beam_size=self.config.beam_size,
+                best_of=self.config.beam_size,
+                temperature=self.config.temperature,
+                vad_filter=use_vad,
+                vad_parameters=vad_params,
+                word_timestamps=False,
+                condition_on_previous_text=False,
+            )
+            
+            logger.info(f"🎯 Whisper inference completed, consuming generator...")
+            
+            # ✅ NOUVELLE APPROCHE : Consommer progressivement avec timeout global
+            segments_list_raw = []
+            start_consume_time = time.time()
+            timeout_seconds = 300  # 5 minutes max
+            segment_count = 0
+            
+            logger.info(f"📝 Consuming generator progressively (timeout: {timeout_seconds}s)...")
+            logger.info(f"⏱Segments {segments}")
+            logger.info(f"⏱lenSegments {len(segments)}")
+            logger.info(f"⏱Info {info}")
+            for seg in segments:
+                # Vérifier le timeout à chaque itération
+                elapsed = time.time() - start_consume_time
+                if elapsed > timeout_seconds:
+                    raise TimeoutError(f"Generator consumption exceeded {timeout_seconds}s")
+                
+                segments_list_raw.append(seg)
+                segment_count += 1
+                
+                # Log tous les 5 segments
+                if segment_count % 5 == 0:
+                    logger.info(f"📝 Consumed {segment_count} segments (elapsed: {elapsed:.1f}s)")
+            
+            consume_time = time.time() - start_consume_time
+            logger.info(f"✅ Generator consumed, got {len(segments_list_raw)} segments in {consume_time:.1f}s")
+            
+        except TimeoutError as e:
+            logger.error(f"❌ Timeout while consuming generator: {e}")
+            
+            if use_vad and retry_without_vad:
+                logger.warning(f"⚠️ Retrying WITHOUT VAD...")
+                return self.transcribe_segment(file_path, use_vad=False, retry_without_vad=False)
+            else:
+                raise Exception(f"Generator consumption timed out: {e}")
+        
+        except StopIteration:
+            logger.info(f"✅ Generator exhausted normally")
+        
         except Exception as e:
-            logger.error(f"❌ Error consuming segments generator: {e}")
+            logger.error(f"❌ Error during transcription: {e}", exc_info=True)
             raise
         
         # Convertir les segments en dictionnaires
+        logger.info(f"📝 Converting {len(segments_list_raw)} segments to dict...")
+        
         for i, seg in enumerate(segments_list_raw):
             try:
                 segments_list.append({
@@ -130,7 +140,6 @@ class TranscriptionService:
                 })
                 text_full += seg.text.strip() + " "
                 
-                # Log progressif tous les 10 segments
                 if (i + 1) % 10 == 0:
                     logger.info(f"📝 Processed {i + 1}/{len(segments_list_raw)} segments")
                     
@@ -158,7 +167,7 @@ class TranscriptionService:
         if not file_path.exists():
             raise FileNotFoundError(f"Audio file not found: {file_path}")
         
-        logger.info(f"📁 Processing file: {file_path.name}")
+        logger.info(f"📁 Processing file: {file_path.name} | VAD requested: {use_vad}")
         
         segment_paths = []
         processed_path = None
@@ -177,7 +186,7 @@ class TranscriptionService:
             # 3. Découpe intelligente (si nécessaire)
             segment_paths = split_audio_intelligent(
                 processed_path,
-                use_vad=use_vad and self.config.vad_enabled
+                use_vad=use_vad  # ← Passer le paramètre correct
             )
             logger.info(f"🔪 Created {len(segment_paths)} segment(s)")
             
@@ -190,7 +199,8 @@ class TranscriptionService:
             for i, segment_path in enumerate(segment_paths):
                 logger.info(f"🎤 Transcribing segment {i+1}/{len(segment_paths)}...")
                 
-                text, segments_list, lang = self.transcribe_segment(segment_path)
+                # ✅ CORRECTION : Passer le paramètre use_vad
+                text, segments_list, lang = self.transcribe_segment(segment_path, use_vad=use_vad)
                 
                 # Ajuster les timestamps avec l'offset
                 for seg in segments_list:
