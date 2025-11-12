@@ -17,3 +17,4 @@ pydub==0.25.1
 
 # Utilitaires
 python-dotenv==1.2.1
+psutil==5.9.8

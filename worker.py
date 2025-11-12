@@ -5,6 +5,10 @@ Worker Celery pour la transcription audio
 
 import logging
 import time
+import os
+import psutil
+from datetime import datetime
+from celery.signals import worker_init
 from celery import Celery
 from config import Config
 from transcription_service import TranscriptionService
@@ -13,6 +17,26 @@ from api_client import VocalyxAPIClient
 # --- MODIFICATION 1 : Initialiser SEULEMENT la config ---
 # La config est un objet simple, sans danger pour le 'fork'
 config = Config()
+
+_api_client = None
+_transcription_service = None
+
+WORKER_PROCESS = None
+WORKER_START_TIME = None
+
+@worker_init.connect
+def on_worker_init(**kwargs):
+    """Initialise psutil quand le worker démarre."""
+    global WORKER_PROCESS, WORKER_START_TIME
+    try:
+        WORKER_PROCESS = psutil.Process(os.getpid())
+        WORKER_START_TIME = datetime.now()
+        WORKER_PROCESS.cpu_percent(interval=None) # Initialiser la mesure
+        logger.info(f"Worker {WORKER_PROCESS.pid} initialisé pour monitoring psutil.")
+    except Exception as e:
+        logger.error(f"Erreur lors de l'initialisation de psutil: {e}")
+
+
 
 # Configurer le logging
 from logging_config import setup_logging, setup_colored_logging
@@ -59,6 +83,26 @@ celery_app = Celery(
     broker=config.celery_broker_url,
     backend=config.celery_result_backend
 )
+
+@celery_app.task(name='get_worker_health')
+def get_worker_health():
+    """Retourne les métriques de santé de ce worker."""
+    if WORKER_PROCESS is None:
+        return {'error': 'Worker not initialized'}
+    
+    try:
+        mem_info = WORKER_PROCESS.memory_info()
+        uptime_seconds = (datetime.now() - WORKER_START_TIME).total_seconds()
+        
+        return {
+            'pid': WORKER_PROCESS.pid,
+            'cpu_percent': WORKER_PROCESS.cpu_percent(interval=None),
+            'memory_rss_bytes': mem_info.rss,
+            'memory_percent': WORKER_PROCESS.memory_percent(),
+            'uptime_seconds': uptime_seconds
+        }
+    except Exception as e:
+        return {'error': str(e)}
 
 # ... (votre configuration Celery conf.update reste inchangée) ...
 celery_app.conf.update(
