@@ -9,36 +9,15 @@ import os
 import psutil
 from datetime import datetime
 from celery.signals import worker_init
+from celery.worker.control import Panel
+
 from celery import Celery
 from config import Config
 from transcription_service import TranscriptionService
 from api_client import VocalyxAPIClient
 
-# --- MODIFICATION 1 : Initialiser SEULEMENT la config ---
-# La config est un objet simple, sans danger pour le 'fork'
 config = Config()
 
-_api_client = None
-_transcription_service = None
-
-WORKER_PROCESS = None
-WORKER_START_TIME = None
-
-@worker_init.connect
-def on_worker_init(**kwargs):
-    """Initialise psutil quand le worker démarre."""
-    global WORKER_PROCESS, WORKER_START_TIME
-    try:
-        WORKER_PROCESS = psutil.Process(os.getpid())
-        WORKER_START_TIME = datetime.now()
-        WORKER_PROCESS.cpu_percent(interval=None) # Initialiser la mesure
-        logger.info(f"Worker {WORKER_PROCESS.pid} initialisé pour monitoring psutil.")
-    except Exception as e:
-        logger.error(f"Erreur lors de l'initialisation de psutil: {e}")
-
-
-
-# Configurer le logging
 from logging_config import setup_logging, setup_colored_logging
 
 if config.log_colored:
@@ -53,9 +32,26 @@ else:
     )
 
 # --- MODIFICATION 2 : Déclarer les services comme 'None' ---
-# Ils seront initialisés "paresseusement" par chaque worker.
 _api_client = None
 _transcription_service = None
+
+# --- AJOUTS : Variables globales pour psutil ---
+WORKER_PROCESS = None
+WORKER_START_TIME = None
+
+@worker_init.connect
+def on_worker_init(**kwargs):
+    """Initialise psutil quand le worker démarre."""
+    global WORKER_PROCESS, WORKER_START_TIME
+    try:
+        WORKER_PROCESS = psutil.Process(os.getpid())
+        WORKER_START_TIME = datetime.now()
+        WORKER_PROCESS.cpu_percent(interval=None) # Initialiser la mesure
+        logger.info(f"Worker {WORKER_PROCESS.pid} initialisé pour monitoring psutil.")
+    except Exception as e:
+        logger.error(f"Erreur lors de l'initialisation de psutil: {e}")
+# --- FIN AJOUTS ---
+
 
 def get_api_client():
     """Charge le client API (une fois par worker)"""
@@ -84,26 +80,6 @@ celery_app = Celery(
     backend=config.celery_result_backend
 )
 
-@celery_app.task(name='get_worker_health')
-def get_worker_health():
-    """Retourne les métriques de santé de ce worker."""
-    if WORKER_PROCESS is None:
-        return {'error': 'Worker not initialized'}
-    
-    try:
-        mem_info = WORKER_PROCESS.memory_info()
-        uptime_seconds = (datetime.now() - WORKER_START_TIME).total_seconds()
-        
-        return {
-            'pid': WORKER_PROCESS.pid,
-            'cpu_percent': WORKER_PROCESS.cpu_percent(interval=None),
-            'memory_rss_bytes': mem_info.rss,
-            'memory_percent': WORKER_PROCESS.memory_percent(),
-            'uptime_seconds': uptime_seconds
-        }
-    except Exception as e:
-        return {'error': str(e)}
-
 # ... (votre configuration Celery conf.update reste inchangée) ...
 celery_app.conf.update(
     task_serializer='json',
@@ -120,6 +96,39 @@ celery_app.conf.update(
     task_send_sent_event=True,
 )
 
+
+@Panel.register(
+    name='get_worker_health',
+    alias='health'
+)
+def get_worker_health_handler(state, **kwargs):
+    """
+    Handler pour la commande de contrôle 'get_worker_health'.
+    Ne retourne que les stats psutil (CPU/RAM/Uptime).
+    """
+    if WORKER_PROCESS is None:
+        logger.warning("get_worker_health_handler appelé avant initialisation de psutil.")
+        return {'error': 'Worker not initialized'}
+    
+    try:
+        mem_info = WORKER_PROCESS.memory_info()
+        uptime_seconds = (datetime.now() - WORKER_START_TIME).total_seconds()
+        
+        # Les stats métier (audio traité) sont calculées par l'API
+        
+        health_data = {
+            'pid': WORKER_PROCESS.pid,
+            'cpu_percent': WORKER_PROCESS.cpu_percent(interval=None),
+            'memory_rss_bytes': mem_info.rss,
+            'memory_percent': WORKER_PROCESS.memory_percent(),
+            'uptime_seconds': uptime_seconds
+        }
+        
+        return health_data
+        
+    except Exception as e:
+        logger.error(f"Erreur dans get_worker_health_handler: {e}", exc_info=True)
+        return {'error': str(e)}
 
 @celery_app.task(
     bind=True,
@@ -140,14 +149,9 @@ def transcribe_audio_task(self, transcription_id: str):
     start_time = time.time()
     
     try:
-        # --- MODIFICATION 3 : Récupérer les services via les "getters" ---
-        try:
-            api_client = get_api_client()
-            transcription_service = get_transcription_service()
-        except Exception as e:
-            logger.error(f"[{transcription_id}] ❌ Erreur critique lors de l'initialisation du service: {e}", exc_info=True)
-            raise self.retry(exc=e)
-        # --- FIN MODIFICATION ---
+        # Assure que les services sont initialisés (nécessaire pour le handler ci-dessus)
+        api_client = get_api_client()
+        transcription_service = get_transcription_service()
 
         # 1. Récupérer les informations de la transcription depuis l'API
         logger.info(f"[{transcription_id}] 📡 Fetching transcription data from API...")
@@ -171,8 +175,6 @@ def transcribe_audio_task(self, transcription_id: str):
         # 3. Exécuter la transcription
         logger.info(f"[{transcription_id}] 🎤 Starting transcription with Whisper...")
         
-        # Le 'transcription_service' est maintenant propre à ce worker,
-        # la boucle sur le générateur ne devrait plus bloquer.
         result = transcription_service.transcribe(
             file_path=file_path,
             use_vad=use_vad
@@ -223,7 +225,6 @@ def transcribe_audio_task(self, transcription_id: str):
         
         # Mettre à jour le statut à "error"
         try:
-            # Ré-obtenir le client au cas où il aurait été perdu
             api_client_on_error = get_api_client()
             api_client_on_error.update_transcription(transcription_id, {
                 "status": "error",
@@ -248,7 +249,6 @@ def transcribe_audio_task(self, transcription_id: str):
 if __name__ == "__main__":
     # ... (Le reste de votre fichier __main__ est parfait et n'a pas besoin d'être modifié) ...
     logger.info(f"🚀 Starting Celery worker: {config.instance_name}")
-    # ...
     celery_app.worker_main([
         'worker',
         f'--loglevel={config.log_level.lower()}',

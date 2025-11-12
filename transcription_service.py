@@ -22,11 +22,6 @@ class TranscriptionService:
     def __init__(self, config):
         self.config = config
         
-        # Statistiques du worker
-        self.total_jobs_completed = 0
-        self.total_audio_processed_s = 0.0
-        self.total_processing_time_s = 0.0
-        
         # Charger le modèle Whisper
         self._load_model()
     
@@ -228,20 +223,3 @@ class TranscriptionService:
                 logger.debug("🧹 Temporary files cleaned")
             except Exception as e:
                 logger.warning(f"⚠️ Cleanup error: {e}")
-    
-    def update_stats(self, audio_duration: float, processing_time: float):
-        """Met à jour les statistiques du worker"""
-        self.total_jobs_completed += 1
-        self.total_audio_processed_s += audio_duration
-        self.total_processing_time_s += processing_time
-    
-    def get_stats(self) -> Dict:
-        """Retourne les statistiques du worker"""
-        return {
-            "total_jobs_completed": self.total_jobs_completed,
-            "total_audio_processed_s": round(self.total_audio_processed_s, 2),
-            "total_processing_time_s": round(self.total_processing_time_s, 2),
-            "avg_speed_ratio": round(
-                self.total_audio_processed_s / self.total_processing_time_s, 2
-            ) if self.total_processing_time_s > 0 else 0
-        }
