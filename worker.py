@@ -206,12 +206,6 @@ def transcribe_audio_task(self, transcription_id: str):
         
         logger.info(f"[{transcription_id}] 💾 Results saved to API")
         
-        # Mettre à jour les statistiques du service
-        transcription_service.update_stats(
-            audio_duration=result["duration"],
-            processing_time=processing_time
-        )
-        
         return {
             "status": "success",
             "transcription_id": transcription_id,
