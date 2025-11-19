@@ -12,7 +12,7 @@ from audio_utils import get_audio_duration, preprocess_audio, split_audio_intell
 from diarization import DiarizationService
 
 # Imports non utilisés (TimeoutError, signal, contextmanager) supprimés
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("vocalyx")
 
 class TranscriptionService:
     """
@@ -141,7 +141,7 @@ class TranscriptionService:
         
         return text_full.strip(), segments_list, info.language
     
-    def transcribe(self, file_path: str, use_vad: bool = True, use_diarization: bool = False) -> Dict:
+    def transcribe(self, file_path: str, use_vad: bool = True, use_diarization: bool = False, transcription_id: str = None) -> Dict:
         """
         Transcrit un fichier audio (point d'entrée principal).
         
@@ -149,6 +149,7 @@ class TranscriptionService:
             file_path: Chemin vers le fichier audio
             use_vad: Utiliser la détection de voix
             use_diarization: Activer la diarisation des locuteurs
+            transcription_id: ID de la transcription (pour les logs)
             
         Returns:
             dict: Résultats de la transcription
@@ -158,7 +159,10 @@ class TranscriptionService:
         if not file_path.exists():
             raise FileNotFoundError(f"Audio file not found: {file_path}")
         
-        logger.info(f"📁 Processing file: {file_path.name} | VAD requested: {use_vad}")
+        # Format des logs avec transcription_id si disponible
+        log_prefix = f"[{transcription_id}] " if transcription_id else ""
+        
+        logger.info(f"{log_prefix}📁 Processing file: {file_path.name} | VAD requested: {use_vad}")
         
         segment_paths = []
         processed_path = None
@@ -168,18 +172,18 @@ class TranscriptionService:
             
             # 1. Obtenir la durée réelle de l'audio
             original_duration = get_audio_duration(file_path)
-            logger.info(f"📏 Audio duration: {original_duration}s")
+            logger.info(f"{log_prefix}📏 Audio duration: {original_duration}s")
             
             # 2. Pré-traitement audio (normalisation, conversion mono 16kHz)
             processed_path = preprocess_audio(file_path)
-            logger.info(f"✨ Audio preprocessed")
+            logger.info(f"{log_prefix}✨ Audio preprocessed")
             
             # 3. Découpe intelligente (si nécessaire)
             segment_paths = split_audio_intelligent(
                 processed_path,
                 use_vad=use_vad
             )
-            logger.info(f"🔪 Created {len(segment_paths)} segment(s)")
+            logger.info(f"{log_prefix}🔪 Created {len(segment_paths)} segment(s)")
             
             # 4. Transcription
             full_text = ""
@@ -188,7 +192,7 @@ class TranscriptionService:
             time_offset = 0.0
             
             for i, segment_path in enumerate(segment_paths):
-                logger.info(f"🎤 Transcribing segment {i+1}/{len(segment_paths)}...")
+                logger.info(f"{log_prefix}🎤 Transcribing segment {i+1}/{len(segment_paths)}...")
                 
                 text, segments_list, lang = self.transcribe_segment(segment_path, use_vad=use_vad)
                 
@@ -210,7 +214,7 @@ class TranscriptionService:
             # 5. Diarisation (si activée pour cette transcription)
             if use_diarization:
                 if self.diarization_service and self.diarization_service.pipeline:
-                    logger.info("🎤 Running speaker diarization...")
+                    logger.info(f"{log_prefix}🎤 Running speaker diarization...")
                     try:
                         # Utiliser le fichier audio original pour la diarisation
                         diarization_segments = self.diarization_service.diarize(file_path)
@@ -221,20 +225,20 @@ class TranscriptionService:
                                 full_segments,
                                 diarization_segments
                             )
-                            logger.info("✅ Speaker diarization completed and assigned to segments")
+                            logger.info(f"{log_prefix}✅ Speaker diarization completed and assigned to segments")
                         else:
-                            logger.warning("⚠️ Diarization returned no segments")
+                            logger.warning(f"{log_prefix}⚠️ Diarization returned no segments")
                     except Exception as e:
-                        logger.error(f"❌ Error during diarization: {e}", exc_info=True)
+                        logger.error(f"{log_prefix}❌ Error during diarization: {e}", exc_info=True)
                         # Continuer sans diarisation en cas d'erreur
                 else:
-                    logger.warning("⚠️ Diarization requested but service not available (check model configuration)")
+                    logger.warning(f"{log_prefix}⚠️ Diarization requested but service not available (check model configuration)")
             
             processing_time = round(time.time() - start_time, 2)
             speed_ratio = round(original_duration / processing_time, 2) if processing_time > 0 else 0
             
             logger.info(
-                f"✅ Transcription completed | "
+                f"{log_prefix}✅ Transcription completed | "
                 f"Segments: {len(full_segments)} | "
                 f"Speed: {speed_ratio}x realtime"
             )
@@ -258,6 +262,8 @@ class TranscriptionService:
                     if seg_path.exists():
                         seg_path.unlink()
                 
-                logger.debug("🧹 Temporary files cleaned")
+                log_prefix = f"[{transcription_id}] " if transcription_id else ""
+                logger.debug(f"{log_prefix}🧹 Temporary files cleaned")
             except Exception as e:
-                logger.warning(f"⚠️ Cleanup error: {e}")
+                log_prefix = f"[{transcription_id}] " if transcription_id else ""
+                logger.warning(f"{log_prefix}⚠️ Cleanup error: {e}")

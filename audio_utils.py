@@ -12,7 +12,7 @@ from pydub import AudioSegment
 from pydub.effects import normalize
 from pydub.silence import detect_nonsilent
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("vocalyx")
 
 def sanitize_filename(filename: str) -> str:
     """

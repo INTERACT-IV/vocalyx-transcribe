@@ -7,7 +7,7 @@ import logging
 from typing import Dict, Optional
 import httpx
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("vocalyx")
 
 class VocalyxAPIClient:
     """

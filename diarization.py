@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("vocalyx")
 
 # Import conditionnel de torch (nécessaire pour pyannote.audio)
 try:

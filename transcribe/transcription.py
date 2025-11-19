@@ -19,7 +19,7 @@ from config import Config
 from database import SessionLocal, Transcription
 from transcribe.audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("vocalyx")
 
 class TranscriptionService:
     """

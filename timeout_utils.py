@@ -5,7 +5,7 @@ import threading
 import functools
 import logging
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("vocalyx")
 
 class TimeoutError(Exception):
     """Exception levée quand une opération timeout"""

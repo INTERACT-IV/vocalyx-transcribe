@@ -94,6 +94,14 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
     worker_send_task_events=True,
     task_send_sent_event=True,
+    # Configuration du format de logging pour Celery
+    worker_log_format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    worker_task_log_format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    worker_log_datefmt='%Y-%m-%d %H:%M:%S',
+    # Désactiver le warning de sécurité pour les containers Docker (on tourne en root par design)
+    worker_disable_rate_limits=False,
+    # Ignorer le warning de sécurité root dans les containers Docker
+    worker_hijack_root_logger=False,
 )
 
 
@@ -179,7 +187,8 @@ def transcribe_audio_task(self, transcription_id: str):
         result = transcription_service.transcribe(
             file_path=file_path,
             use_vad=use_vad,
-            use_diarization=use_diarization
+            use_diarization=use_diarization,
+            transcription_id=transcription_id
         )
         
         logger.info(f"[{transcription_id}] ✅ Transcription service completed")

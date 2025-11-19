@@ -67,8 +67,17 @@ def setup_logging(log_level: str = "INFO", log_file: str = None):
         "faster_whisper",
         "vocalyx",
         "watchfiles",
-        "celery",       # <-- MODIFICATION AJOUTÉE
-        "celery.task"   # <-- MODIFICATION AJOUTÉE
+        "diarization",      # Logger de diarization (pour compatibilité)
+        "audio_utils",      # Logger de audio_utils (pour compatibilité)
+        "api_client",       # Logger de api_client (pour compatibilité)
+        "httpx",            # Logger de httpx (bibliothèque externe)
+        "matplotlib",       # Logger de matplotlib (bibliothèque externe)
+        "matplotlib.font_manager",  # Logger spécifique de matplotlib
+        "py.warnings",      # Logger pour les warnings Python (pyannote, pytorch, etc.)
+        "celery",           # Logger principal Celery
+        "celery.task",      # Logger des tâches Celery
+        "celery.worker",    # Logger des workers Celery
+        "celery.app",       # Logger de l'application Celery
     ]
     
     for logger_name in loggers_to_configure:
@@ -84,6 +93,21 @@ def setup_logging(log_level: str = "INFO", log_file: str = None):
         
     # ❗️ MODIFICATION: Mettre watchfiles à WARNING
     logging.getLogger("watchfiles").setLevel(logging.WARNING)
+    
+    # Réduire le verbosité des bibliothèques externes
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # Ne montrer que les erreurs HTTP
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)  # Ne montrer que les warnings matplotlib
+    logging.getLogger("matplotlib.font_manager").setLevel(logging.WARNING)  # Ne montrer que les warnings de fonts
+    
+    # Filtrer le warning de sécurité Celery pour les containers Docker (on tourne en root par design)
+    import warnings
+    try:
+        from celery.platforms import SecurityWarning
+        warnings.filterwarnings('ignore', category=SecurityWarning, module='celery.platforms')
+    except ImportError:
+        pass
+    # Filtrer aussi les UserWarning génériques de celery.platforms
+    warnings.filterwarnings('ignore', category=UserWarning, module='celery.platforms')
     
     # Logger initial
     logger = logging.getLogger("vocalyx")
@@ -207,8 +231,17 @@ def setup_colored_logging(log_level: str = "INFO", log_file: str = None):
     # Configurer les loggers spécifiques
     for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error", 
                         "faster_whisper", "vocalyx", "watchfiles",
-                        "celery",       # <-- MODIFICATION AJOUTÉE
-                        "celery.task"   # <-- MODIFICATION AJOUTÉE
+                        "diarization",      # Logger de diarization (pour compatibilité)
+                        "audio_utils",      # Logger de audio_utils (pour compatibilité)
+                        "api_client",       # Logger de api_client (pour compatibilité)
+                        "httpx",            # Logger de httpx (bibliothèque externe)
+                        "matplotlib",       # Logger de matplotlib (bibliothèque externe)
+                        "matplotlib.font_manager",  # Logger spécifique de matplotlib
+                        "py.warnings",      # Logger pour les warnings Python (pyannote, pytorch, etc.)
+                        "celery",           # Logger principal Celery
+                        "celery.task",      # Logger des tâches Celery
+                        "celery.worker",    # Logger des workers Celery
+                        "celery.app",       # Logger de l'application Celery
                        ]:
         log = logging.getLogger(logger_name)
         log.setLevel(numeric_level)
@@ -219,6 +252,21 @@ def setup_colored_logging(log_level: str = "INFO", log_file: str = None):
         
     # ❗️ MODIFICATION: Mettre watchfiles à WARNING
     logging.getLogger("watchfiles").setLevel(logging.WARNING)
+    
+    # Réduire le verbosité des bibliothèques externes
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # Ne montrer que les erreurs HTTP
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)  # Ne montrer que les warnings matplotlib
+    logging.getLogger("matplotlib.font_manager").setLevel(logging.WARNING)  # Ne montrer que les warnings de fonts
+    
+    # Filtrer le warning de sécurité Celery pour les containers Docker (on tourne en root par design)
+    import warnings
+    try:
+        from celery.platforms import SecurityWarning
+        warnings.filterwarnings('ignore', category=SecurityWarning, module='celery.platforms')
+    except ImportError:
+        pass
+    # Filtrer aussi les UserWarning génériques de celery.platforms
+    warnings.filterwarnings('ignore', category=UserWarning, module='celery.platforms')
     
     logger = logging.getLogger("vocalyx")
     logger.info("✅ Logging coloré configuré")
