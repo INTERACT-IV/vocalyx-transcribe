@@ -6,9 +6,10 @@ Service de transcription avec Whisper (adapté pour worker Celery)
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from faster_whisper import WhisperModel
 from audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
+from diarization import DiarizationService
 
 # Imports non utilisés (TimeoutError, signal, contextmanager) supprimés
 logger = logging.getLogger(__name__)
@@ -24,6 +25,19 @@ class TranscriptionService:
         
         # Charger le modèle Whisper
         self._load_model()
+        
+        # Charger le service de diarisation (toujours initialiser, même si pas activé globalement)
+        # Cela permet d'utiliser la diarisation à la demande par transcription
+        self.diarization_service = None
+        try:
+            self.diarization_service = DiarizationService(config)
+            if self.diarization_service.pipeline is None:
+                logger.info("ℹ️ Diarization service initialized but model not available (will be skipped if requested)")
+            else:
+                logger.info("✅ Diarization service initialized and ready")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to initialize diarization service: {e} (will be skipped if requested)")
+            self.diarization_service = None
     
     def _load_model(self):
         """Charge le modèle Whisper"""
@@ -127,13 +141,14 @@ class TranscriptionService:
         
         return text_full.strip(), segments_list, info.language
     
-    def transcribe(self, file_path: str, use_vad: bool = True) -> Dict:
+    def transcribe(self, file_path: str, use_vad: bool = True, use_diarization: bool = False) -> Dict:
         """
         Transcrit un fichier audio (point d'entrée principal).
         
         Args:
             file_path: Chemin vers le fichier audio
             use_vad: Utiliser la détection de voix
+            use_diarization: Activer la diarisation des locuteurs
             
         Returns:
             dict: Résultats de la transcription
@@ -191,6 +206,29 @@ class TranscriptionService:
                 
                 if not language_detected:
                     language_detected = lang
+            
+            # 5. Diarisation (si activée pour cette transcription)
+            if use_diarization:
+                if self.diarization_service and self.diarization_service.pipeline:
+                    logger.info("🎤 Running speaker diarization...")
+                    try:
+                        # Utiliser le fichier audio original pour la diarisation
+                        diarization_segments = self.diarization_service.diarize(file_path)
+                        
+                        if diarization_segments:
+                            # Assigner les locuteurs aux segments de transcription
+                            full_segments = self.diarization_service.assign_speakers_to_segments(
+                                full_segments,
+                                diarization_segments
+                            )
+                            logger.info("✅ Speaker diarization completed and assigned to segments")
+                        else:
+                            logger.warning("⚠️ Diarization returned no segments")
+                    except Exception as e:
+                        logger.error(f"❌ Error during diarization: {e}", exc_info=True)
+                        # Continuer sans diarisation en cas d'erreur
+                else:
+                    logger.warning("⚠️ Diarization requested but service not available (check model configuration)")
             
             processing_time = round(time.time() - start_time, 2)
             speed_ratio = round(original_duration / processing_time, 2) if processing_time > 0 else 0

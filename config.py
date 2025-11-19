@@ -69,6 +69,13 @@ class Config:
             'min_silence_duration_ms': '500'
         }
         
+        config['DIARIZATION'] = {
+            'enabled': 'false',
+            'model': 'pyannote/speaker-diarization-3.1',
+            'model_path': '/app/models/pyannote-speaker-diarization',
+            'hf_token': ''
+        }
+        
         config['LOGGING'] = {
             'level': 'INFO',
             'file_enabled': 'true',
@@ -183,6 +190,25 @@ class Config:
             self.config.get('LOGGING', 'colored', fallback='true')
         )
         self.log_colored = log_colored_str.lower() in ['true', '1', 't']
+        
+        # DIARIZATION
+        diarization_enabled_str = os.environ.get(
+            'DIARIZATION_ENABLED',
+            self.config.get('DIARIZATION', 'enabled', fallback='false')
+        )
+        self.diarization_enabled = diarization_enabled_str.lower() in ['true', '1', 't']
+        self.diarization_model = os.environ.get(
+            'DIARIZATION_MODEL',
+            self.config.get('DIARIZATION', 'model', fallback='pyannote/speaker-diarization-3.1')
+        )
+        self.diarization_model_path = os.environ.get(
+            'DIARIZATION_MODEL_PATH',
+            self.config.get('DIARIZATION', 'model_path', fallback='/app/models/pyannote-speaker-diarization')
+        )
+        self.hf_token = os.environ.get(
+            'HF_TOKEN',
+            self.config.get('DIARIZATION', 'hf_token', fallback='')
+        )
     
     def reload(self):
         """Recharge la configuration depuis le fichier"""

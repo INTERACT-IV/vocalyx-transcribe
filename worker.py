@@ -162,8 +162,9 @@ def transcribe_audio_task(self, transcription_id: str):
         
         file_path = transcription.get('file_path')
         use_vad = transcription.get('vad_enabled', True)
+        use_diarization = transcription.get('diarization_enabled', False)
         
-        logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad}")
+        logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad} | Diarization: {use_diarization}")
         
         # 2. Mettre à jour le statut à "processing"
         api_client.update_transcription(transcription_id, {
@@ -177,7 +178,8 @@ def transcribe_audio_task(self, transcription_id: str):
         
         result = transcription_service.transcribe(
             file_path=file_path,
-            use_vad=use_vad
+            use_vad=use_vad,
+            use_diarization=use_diarization
         )
         
         logger.info(f"[{transcription_id}] ✅ Transcription service completed")
