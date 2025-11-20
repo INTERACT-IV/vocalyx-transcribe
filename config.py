@@ -52,7 +52,8 @@ class Config:
             'max_workers': '2',
             'segment_length_ms': '45000',
             'vad_enabled': 'true',
-            'beam_size': '5',
+            'beam_size': '1',  # Optimisé pour CPU (greedy search, plus rapide)
+            'best_of': '1',    # Pas de recherche multiple (optimisation CPU)
             'temperature': '0.0'
         }
         
@@ -150,7 +151,8 @@ class Config:
         )
         self.vad_enabled = vad_enabled_str.lower() in ['true', '1', 't']
         
-        self.beam_size = self.config.getint('PERFORMANCE', 'beam_size')
+        self.beam_size = self.config.getint('PERFORMANCE', 'beam_size', fallback=1)
+        self.best_of = self.config.getint('PERFORMANCE', 'best_of', fallback=1)
         self.temperature = self.config.getfloat('PERFORMANCE', 'temperature')
         
         # PATHS

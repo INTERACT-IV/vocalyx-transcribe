@@ -157,9 +157,8 @@ def transcribe_audio_task(self, transcription_id: str):
     start_time = time.time()
     
     try:
-        # Assure que les services sont initialisés (nécessaire pour le handler ci-dessus)
+        # Assure que le client API est initialisé
         api_client = get_api_client()
-        transcription_service = get_transcription_service()
 
         # 1. Récupérer les informations de la transcription depuis l'API
         logger.info(f"[{transcription_id}] 📡 Fetching transcription data from API...")
@@ -171,8 +170,9 @@ def transcribe_audio_task(self, transcription_id: str):
         file_path = transcription.get('file_path')
         use_vad = transcription.get('vad_enabled', True)
         use_diarization = transcription.get('diarization_enabled', False)
+        whisper_model = transcription.get('whisper_model', 'small')  # Récupérer le modèle choisi
         
-        logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad} | Diarization: {use_diarization}")
+        logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad} | Diarization: {use_diarization} | Model: {whisper_model}")
         
         # 2. Mettre à jour le statut à "processing"
         api_client.update_transcription(transcription_id, {
@@ -181,7 +181,12 @@ def transcribe_audio_task(self, transcription_id: str):
         })
         logger.info(f"[{transcription_id}] ⚙️ Status updated to 'processing'")
         
-        # 3. Exécuter la transcription
+        # 3. Créer une instance du service de transcription avec le modèle spécifique
+        # (Chaque transcription peut utiliser un modèle différent)
+        logger.info(f"[{transcription_id}] 🎤 Initializing transcription service with model: {whisper_model}")
+        transcription_service = TranscriptionService(config, model_name=whisper_model)
+        
+        # 4. Exécuter la transcription
         logger.info(f"[{transcription_id}] 🎤 Starting transcription with Whisper...")
         
         result = transcription_service.transcribe(

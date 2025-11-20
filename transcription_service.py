@@ -20,8 +20,17 @@ class TranscriptionService:
     Version simplifiée pour worker Celery (pas de pool d'exécution, Celery gère la concurrence).
     """
     
-    def __init__(self, config):
+    def __init__(self, config, model_name: Optional[str] = None):
+        """
+        Initialise le service de transcription.
+        
+        Args:
+            config: Configuration du worker
+            model_name: Nom du modèle Whisper à utiliser (tiny, base, small, medium, large).
+                       Si None, utilise le modèle de la config.
+        """
         self.config = config
+        self.model_name = model_name or config.model
         
         # Charger le modèle Whisper
         self._load_model()
@@ -41,18 +50,38 @@ class TranscriptionService:
     
     def _load_model(self):
         """Charge le modèle Whisper"""
-        logger.info(f"🚀 Loading Whisper model: {self.config.model}")
+        # Construire le chemin du modèle si c'est un nom simple (tiny, base, etc.)
+        model_path = self.model_name
+        
+        # Si c'est un nom simple (tiny, base, small, medium), construire le chemin
+        if model_path in ["tiny", "base", "small", "medium", "large"]:
+            model_path = f"./models/openai-whisper-{self.model_name}"
+        
+        # Convertir les chemins relatifs en chemins absolus
+        # faster-whisper interprète les chemins relatifs comme des repo_id HuggingFace
+        if model_path.startswith("./"):
+            # Enlever le préfixe ./ et construire le chemin absolu
+            relative_path = model_path[2:]  # Enlever "./"
+            # Utiliser /app comme base (WORKDIR du conteneur Docker)
+            model_path = f"/app/{relative_path}"
+        elif not model_path.startswith("/") and not model_path.startswith("openai/"):
+            # Si c'est un chemin relatif sans ./ (ex: "models/...")
+            # et que ce n'est pas un repo HuggingFace, le convertir en absolu
+            model_path = f"/app/{model_path}"
+        
+        logger.info(f"🚀 Loading Whisper model: {model_path} (requested: {self.model_name})")
         logger.info(f"📊 Device: {self.config.device} | Compute: {self.config.compute_type}")
         
         self.model = WhisperModel(
-            self.config.model,
+            model_path,
             device=self.config.device,
             compute_type=self.config.compute_type,
             cpu_threads=self.config.cpu_threads
         )
         
         logger.info(f"✅ Whisper model loaded successfully")
-        logger.info(f"⚙️ VAD: {self.config.vad_enabled} | Beam size: {self.config.beam_size}")
+        best_of = getattr(self.config, 'best_of', self.config.beam_size)
+        logger.info(f"⚙️ VAD: {self.config.vad_enabled} | Beam size: {self.config.beam_size} | Best of: {best_of}")
         
     def transcribe_segment(self, file_path: Path, use_vad: bool = True, retry_without_vad: bool = True) -> Tuple[str, List[Dict], str]:
         """
@@ -79,17 +108,18 @@ class TranscriptionService:
                     speech_pad_ms=self.config.vad_speech_pad_ms
                 )
             
+            # Paramètres optimisés pour CPU
             segments, info = self.model.transcribe(
                 str(file_path),
                 language=self.config.language or None,
                 task="transcribe",
-                beam_size=self.config.beam_size,
-                best_of=self.config.beam_size,
+                beam_size=self.config.beam_size,  # 1 pour CPU (greedy search)
+                best_of=getattr(self.config, 'best_of', self.config.beam_size),  # 1 pour CPU
                 temperature=self.config.temperature,
-                vad_filter=use_vad,
+                vad_filter=use_vad,  # VAD intégré de faster-whisper (optimisé)
                 vad_parameters=vad_params,
-                word_timestamps=False,
-                condition_on_previous_text=False,
+                word_timestamps=False,  # Désactivé pour CPU (plus rapide)
+                condition_on_previous_text=False,  # Désactivé pour CPU (plus rapide)
             )
             
             logger.info(f"🎯 Whisper inference completed, consuming generator...")
