@@ -165,18 +165,19 @@ def split_audio_intelligent(
 ) -> List[Path]:
     """
     Découpe l'audio de manière intelligente avec taille adaptative.
+    Optimisé Phase 3 : Réduction de la consommation mémoire.
     
     Stratégies :
     - Audio court (< 60s) : pas de découpe
-    - Audio moyen avec VAD : découpe selon les segments de parole
+    - Audio avec VAD : Découpe temporelle simple (faster-whisper gère le VAD intégré)
     - Audio long sans VAD : découpe par durée fixe (adaptative selon CPU)
     
     Args:
         file_path: Chemin vers le fichier audio
         use_vad: Utiliser la détection de voix (default: True)
         segment_length_ms: Longueur des segments en ms (default: None = 45000 si non fourni)
-        vad_min_silence_len: VAD - Durée min de silence en ms (default: 500)
-        vad_silence_thresh: VAD - Seuil de silence en dB (default: -40)
+        vad_min_silence_len: VAD - Durée min de silence en ms (non utilisé si use_vad=True, faster-whisper le gère)
+        vad_silence_thresh: VAD - Seuil de silence en dB (non utilisé si use_vad=True, faster-whisper le gère)
         
     Returns:
         List[Path]: Liste des chemins vers les segments audio
@@ -188,48 +189,54 @@ def split_audio_intelligent(
         segment_length_ms = 45000  # Valeur par défaut (sera override par config si disponible)
     
     try:
-        audio = AudioSegment.from_file(str(file_path))
-        duration_ms = len(audio)
-        duration_s = duration_ms / 1000
+        # Phase 3 - Optimisation : Obtenir la durée sans charger tout l'audio en mémoire
+        try:
+            info = sf.info(str(file_path))
+            duration_s = info.duration
+            duration_ms = int(duration_s * 1000)
+        except Exception as e:
+            logger.warning(f"⚠️ Could not get duration with soundfile, using pydub: {e}")
+            # Fallback : charger avec pydub seulement pour la durée
+            audio = AudioSegment.from_file(str(file_path))
+            duration_ms = len(audio)
+            duration_s = duration_ms / 1000
+            del audio  # Libérer immédiatement la mémoire
         
         # Audio court (< 60s) : pas de découpe
         if duration_s < 60:
             logger.info(f"📊 Audio court ({duration_s:.1f}s), pas de découpe")
             return [file_path]
         
-        # VAD activé : découper selon les segments de parole
+        # Phase 3 - Optimisation : Si VAD activé, utiliser découpe temporelle simple
+        # faster-whisper gère déjà le VAD intégré, pas besoin de detect_speech_segments
+        # qui charge tout l'audio en mémoire
         if use_vad:
-            logger.info(f"🎯 Using VAD-based segmentation")
-            speech_segments = detect_speech_segments(
-                file_path,
-                min_silence_len=vad_min_silence_len,
-                silence_thresh=vad_silence_thresh
-            )
+            logger.info(f"🎯 Using time-based segmentation with VAD (faster-whisper will handle VAD filtering)")
+            # Découpe temporelle simple : faster-whisper appliquera le VAD sur chaque segment
+            # Cela évite de charger tout l'audio deux fois (une fois pour detect_speech_segments, une fois pour export)
             
-            # Grouper les segments proches (< 2s d'écart) pour éviter trop de fragmentation
-            merged_segments = []
-            current_start, current_end = speech_segments[0]
+            # Charger l'audio une seule fois pour la découpe
+            audio = AudioSegment.from_file(str(file_path))
             
-            for start, end in speech_segments[1:]:
-                if start - current_end < 2000:  # Si moins de 2s d'écart
-                    current_end = end
-                else:
-                    merged_segments.append((current_start, current_end))
-                    current_start, current_end = start, end
-            merged_segments.append((current_start, current_end))
-            
-            # Exporter les segments
-            for i, (start_ms, end_ms) in enumerate(merged_segments):
+            # Découper par segments temporels (faster-whisper filtrera le silence)
+            for i, start_ms in enumerate(range(0, duration_ms, segment_length_ms)):
+                end_ms = min(start_ms + segment_length_ms, duration_ms)
                 segment = audio[start_ms:end_ms]
                 segment_path = file_path.parent / f"{file_path.stem}_vad{i}.wav"
                 segment.export(str(segment_path), format="wav")
                 segment_paths.append(segment_path)
             
-            logger.info(f"🎯 VAD: Created {len(segment_paths)} optimized segments")
+            # Libérer la mémoire immédiatement
+            del audio
+            
+            logger.info(f"🎯 Created {len(segment_paths)} time-based segments (VAD will be applied by faster-whisper)")
             return segment_paths
         
         # Découpe classique par durée (sans VAD)
         logger.info(f"📊 Using time-based segmentation ({segment_length_ms}ms chunks)")
+        
+        # Charger l'audio une seule fois
+        audio = AudioSegment.from_file(str(file_path))
         
         if duration_s < 180:  # Audio moyen (< 3 min) : découper en 2
             mid = duration_ms // 2
@@ -247,6 +254,9 @@ def split_audio_intelligent(
                 segment.export(str(segment_path), format="wav")
                 segment_paths.append(segment_path)
             logger.info(f"📊 Audio long ({duration_s:.1f}s), découpe en {len(segment_paths)} segments")
+        
+        # Libérer la mémoire immédiatement
+        del audio
         
         return segment_paths
         

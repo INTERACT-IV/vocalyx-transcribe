@@ -7,6 +7,7 @@ import logging
 import time
 import os
 import psutil
+import threading
 from datetime import datetime
 from celery.signals import worker_init
 from celery.worker.control import Panel
@@ -35,6 +36,11 @@ else:
 _api_client = None
 _transcription_service = None
 
+# --- PHASE 3 : Cache de modèles Whisper ---
+_model_cache = {}
+_model_cache_lock = threading.Lock()
+_MAX_CACHED_MODELS = 2  # Limiter à 2 modèles en cache pour économiser la mémoire
+
 # --- AJOUTS : Variables globales pour psutil ---
 WORKER_PROCESS = None
 WORKER_START_TIME = None
@@ -61,14 +67,77 @@ def get_api_client():
         _api_client = VocalyxAPIClient(config)
     return _api_client
 
-def get_transcription_service():
-    """Charge le service de transcription (une fois par worker)"""
-    global _transcription_service
-    if _transcription_service is None:
-        logger.info(f"Initialisation du TranscriptionService pour ce worker ({config.instance_name})...")
-        _transcription_service = TranscriptionService(config)
-        logger.info("Service de transcription (et modèle Whisper) chargé.")
-    return _transcription_service
+def get_transcription_service(model_name: str = 'small'):
+    """
+    Charge le service de transcription avec cache par modèle (Phase 3 - Optimisation).
+    
+    Args:
+        model_name: Nom du modèle Whisper (tiny, base, small, medium, large) ou chemin
+        
+    Returns:
+        TranscriptionService: Service de transcription avec le modèle demandé
+    """
+    global _model_cache, _transcription_service
+    
+    # Normaliser le nom du modèle
+    if not model_name:
+        model_name = 'small'
+    else:
+        model_name = model_name.lower()
+        # Si c'est un chemin, extraire le nom du modèle
+        # Ex: "./models/openai-whisper-small" -> "small"
+        if 'openai-whisper-' in model_name:
+            model_name = model_name.split('openai-whisper-')[-1].split('/')[-1].split('\\')[-1]
+        # Si c'est juste un chemin relatif, utiliser 'small' par défaut
+        elif model_name.startswith('./') or model_name.startswith('/'):
+            # Essayer d'extraire le nom du modèle du chemin
+            parts = model_name.replace('\\', '/').split('/')
+            for part in reversed(parts):
+                if part in ['tiny', 'base', 'small', 'medium', 'large']:
+                    model_name = part
+                    break
+            else:
+                model_name = 'small'  # Fallback
+    
+    # Si aucun modèle spécifié, utiliser l'ancien comportement (rétrocompatibilité)
+    if model_name == 'small' and _transcription_service is not None:
+        # Vérifier si le service existant utilise le modèle par défaut
+        if not hasattr(_transcription_service, 'model_name') or _transcription_service.model_name == 'small':
+            return _transcription_service
+    
+    # Utiliser le cache de modèles
+    with _model_cache_lock:
+        # Vérifier si le modèle est déjà en cache
+        if model_name in _model_cache:
+            logger.info(f"✅ Using cached Whisper model: {model_name}")
+            _model_cache[model_name]['last_used'] = time.time()
+            return _model_cache[model_name]['service']
+        
+        # Si le cache est plein, supprimer le moins récemment utilisé (LRU)
+        if len(_model_cache) >= _MAX_CACHED_MODELS:
+            oldest_model = min(_model_cache.keys(), 
+                             key=lambda k: _model_cache[k]['last_used'])
+            logger.info(f"🗑️ Removing least recently used model from cache: {oldest_model}")
+            del _model_cache[oldest_model]
+        
+        # Charger le nouveau modèle
+        logger.info(f"🚀 Loading Whisper model into cache: {model_name} (cache: {len(_model_cache)}/{_MAX_CACHED_MODELS})")
+        try:
+            service = TranscriptionService(config, model_name=model_name)
+            _model_cache[model_name] = {
+                'service': service,
+                'last_used': time.time()
+            }
+            logger.info(f"✅ Model {model_name} loaded and cached successfully")
+            
+            # Si c'est le modèle par défaut (small), mettre à jour aussi _transcription_service pour rétrocompatibilité
+            if model_name == 'small':
+                _transcription_service = service
+            
+            return service
+        except Exception as e:
+            logger.error(f"❌ Failed to load model {model_name}: {e}", exc_info=True)
+            raise
 
 # --- FIN DES MODIFICATIONS GLOBALES ---
 
@@ -181,10 +250,10 @@ def transcribe_audio_task(self, transcription_id: str):
         })
         logger.info(f"[{transcription_id}] ⚙️ Status updated to 'processing'")
         
-        # 3. Créer une instance du service de transcription avec le modèle spécifique
-        # (Chaque transcription peut utiliser un modèle différent)
-        logger.info(f"[{transcription_id}] 🎤 Initializing transcription service with model: {whisper_model}")
-        transcription_service = TranscriptionService(config, model_name=whisper_model)
+        # 3. Obtenir le service de transcription avec cache de modèles (Phase 3 - Optimisation)
+        # Le cache réutilise les modèles déjà chargés, évitant 5-15s de chargement
+        logger.info(f"[{transcription_id}] 🎤 Getting transcription service with model: {whisper_model} (cached)")
+        transcription_service = get_transcription_service(model_name=whisper_model)
         
         # 4. Exécuter la transcription
         logger.info(f"[{transcription_id}] 🎤 Starting transcription with Whisper...")
