@@ -144,8 +144,9 @@ class TranscriptionService:
             original_duration = get_audio_duration(file_path)
             logger.info(f"[{transcription_id}] 📏 Original audio duration: {original_duration}s")
             
-            # 2. Pré-traitement audio
-            processed_path = preprocess_audio(file_path)
+            # 2. Pré-traitement audio (nouveau format avec support stéréo)
+            preprocessed = preprocess_audio(file_path, preserve_stereo_for_diarization=False)
+            processed_path = preprocessed['mono']  # Utiliser la version mono pour la transcription
             
             # 3. Découpe intelligente
             use_vad = bool(entry.vad_enabled)

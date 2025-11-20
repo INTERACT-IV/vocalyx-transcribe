@@ -7,6 +7,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from faster_whisper import WhisperModel
 from audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
 from diarization import DiarizationService
@@ -171,6 +172,94 @@ class TranscriptionService:
         
         return text_full.strip(), segments_list, info.language
     
+    def _transcribe_parallel(
+        self, 
+        segment_paths: List[Path], 
+        use_vad: bool, 
+        log_prefix: str
+    ) -> Tuple[List[Dict], str, Optional[str]]:
+        """
+        Transcrit plusieurs segments en parallèle.
+        
+        Args:
+            segment_paths: Liste des chemins vers les segments audio
+            use_vad: Utiliser la détection de voix
+            log_prefix: Préfixe pour les logs
+            
+        Returns:
+            Tuple contenant:
+            - full_segments: Liste de tous les segments avec timestamps ajustés
+            - full_text: Texte complet concaténé
+            - language_detected: Langue détectée
+        """
+        full_segments = []
+        full_text = ""
+        language_detected = None
+        num_segments = len(segment_paths)
+        max_workers = min(self.config.parallel_workers, num_segments)
+        
+        logger.info(f"{log_prefix}⚡ Starting parallel transcription: {num_segments} segments with {max_workers} worker(s)")
+        
+        # Transcription parallèle avec ThreadPoolExecutor
+        # ThreadPoolExecutor car Whisper libère le GIL pendant l'inférence
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Soumettre tous les segments
+            future_to_segment = {
+                executor.submit(self.transcribe_segment, segment_path, use_vad): (i, segment_path)
+                for i, segment_path in enumerate(segment_paths)
+            }
+            
+            # Traiter les résultats au fur et à mesure qu'ils arrivent
+            completed = 0
+            results = {}
+            
+            for future in as_completed(future_to_segment):
+                i, segment_path = future_to_segment[future]
+                try:
+                    text, segments_list, lang = future.result()
+                    results[i] = {
+                        'text': text,
+                        'segments': segments_list,
+                        'lang': lang
+                    }
+                    completed += 1
+                    logger.info(f"{log_prefix}✅ Segment {i+1}/{num_segments} completed ({completed}/{num_segments} done)")
+                    
+                    if language_detected is None:
+                        language_detected = lang
+                        
+                except Exception as e:
+                    logger.error(f"{log_prefix}❌ Error transcribing segment {i+1}: {e}", exc_info=True)
+                    # Continuer avec les autres segments en cas d'erreur
+                    results[i] = {
+                        'text': '',
+                        'segments': [],
+                        'lang': None
+                    }
+        
+        # Assembler les résultats dans l'ordre (triés par index de segment)
+        time_offset = 0.0
+        for i in sorted(results.keys()):
+            result = results[i]
+            segments_list = result['segments']
+            text = result['text']
+            
+            # Ajuster les timestamps avec l'offset
+            for seg in segments_list:
+                seg["start"] = round(seg["start"] + time_offset, 2)
+                seg["end"] = round(seg["end"] + time_offset, 2)
+                full_segments.append(seg)
+            
+            # Mettre à jour l'offset pour le prochain segment
+            if segments_list:
+                time_offset = full_segments[-1]["end"]
+            
+            full_text += text + " "
+        
+        logger.info(f"{log_prefix}✅ Parallel transcription completed: {len(full_segments)} total segments")
+        
+        return full_segments, full_text.strip(), language_detected
+    
     def transcribe(self, file_path: str, use_vad: bool = True, use_diarization: bool = False, transcription_id: str = None) -> Dict:
         """
         Transcrit un fichier audio (point d'entrée principal).
@@ -195,7 +284,8 @@ class TranscriptionService:
         logger.info(f"{log_prefix}📁 Processing file: {file_path.name} | VAD requested: {use_vad}")
         
         segment_paths = []
-        processed_path = None
+        processed_path_mono = None
+        processed_path_stereo = None
         
         try:
             start_time = time.time()
@@ -204,50 +294,59 @@ class TranscriptionService:
             original_duration = get_audio_duration(file_path)
             logger.info(f"{log_prefix}📏 Audio duration: {original_duration}s")
             
-            # 2. Pré-traitement audio (normalisation, conversion mono 16kHz)
-            processed_path = preprocess_audio(file_path)
-            logger.info(f"{log_prefix}✨ Audio preprocessed")
+            # 2. Pré-traitement audio (normalisation, conversion mono 16kHz, préservation stéréo)
+            preprocessed = preprocess_audio(file_path, preserve_stereo_for_diarization=use_diarization)
+            processed_path_mono = preprocessed['mono']
+            processed_path_stereo = preprocessed.get('stereo')
+            is_stereo = preprocessed.get('is_stereo', False)
             
-            # 3. Découpe intelligente (si nécessaire)
+            if is_stereo and processed_path_stereo:
+                logger.info(f"{log_prefix}✨ Audio preprocessed: MONO for Whisper, STEREO preserved for diarization")
+            else:
+                logger.info(f"{log_prefix}✨ Audio preprocessed: MONO (stereo not detected or diarization disabled)")
+            
+            # 3. Découpe intelligente (si nécessaire) - utilise la version mono pour Whisper avec taille adaptative
             segment_paths = split_audio_intelligent(
-                processed_path,
-                use_vad=use_vad
+                processed_path_mono,
+                use_vad=use_vad,
+                segment_length_ms=self.config.segment_length_ms  # Taille adaptative selon CPU
             )
-            logger.info(f"{log_prefix}🔪 Created {len(segment_paths)} segment(s)")
+            logger.info(f"{log_prefix}🔪 Created {len(segment_paths)} segment(s) (adaptive size: {self.config.segment_length_ms}ms)")
             
-            # 4. Transcription
+            # 4. Transcription (parallélisée si plusieurs segments)
             full_text = ""
             full_segments = []
             language_detected = None
-            time_offset = 0.0
             
-            for i, segment_path in enumerate(segment_paths):
-                logger.info(f"{log_prefix}🎤 Transcribing segment {i+1}/{len(segment_paths)}...")
+            # Parallélisation pour plusieurs segments
+            if len(segment_paths) > 1:
+                logger.info(f"{log_prefix}⚡ Parallel transcription: {len(segment_paths)} segments with {self.config.parallel_workers} worker(s)")
+                full_segments, full_text, language_detected = self._transcribe_parallel(
+                    segment_paths, use_vad, log_prefix
+                )
+            else:
+                # Transcription séquentielle pour un seul segment (plus simple)
+                logger.info(f"{log_prefix}🎤 Transcribing single segment...")
+                text, segments_list, lang = self.transcribe_segment(segment_paths[0], use_vad=use_vad)
                 
-                text, segments_list, lang = self.transcribe_segment(segment_path, use_vad=use_vad)
-                
-                # Ajuster les timestamps avec l'offset
-                for seg in segments_list:
-                    seg["start"] = round(seg["start"] + time_offset, 2)
-                    seg["end"] = round(seg["end"] + time_offset, 2)
-                    full_segments.append(seg)
-                
-                # Mettre à jour l'offset pour le prochain segment
-                if full_segments:
-                    time_offset = full_segments[-1]["end"]
-                
-                full_text += text + " "
-                
-                if not language_detected:
-                    language_detected = lang
+                full_segments = segments_list
+                full_text = text
+                language_detected = lang
             
             # 5. Diarisation (si activée pour cette transcription)
             if use_diarization:
                 if self.diarization_service and self.diarization_service.pipeline:
                     logger.info(f"{log_prefix}🎤 Running speaker diarization...")
                     try:
-                        # Utiliser le fichier audio original pour la diarisation
-                        diarization_segments = self.diarization_service.diarize(file_path)
+                        # Utiliser la version stéréo pour la diarisation si disponible (optimal pour séparation des locuteurs)
+                        # Sinon utiliser la version mono
+                        diarization_audio_path = processed_path_stereo if processed_path_stereo else processed_path_mono
+                        if processed_path_stereo:
+                            logger.info(f"{log_prefix}🎯 Using STEREO audio for diarization (optimal: one channel per speaker)")
+                        else:
+                            logger.info(f"{log_prefix}🎯 Using MONO audio for diarization")
+                        
+                        diarization_segments = self.diarization_service.diarize(diarization_audio_path)
                         
                         if diarization_segments:
                             # Assigner les locuteurs aux segments de transcription
@@ -285,9 +384,17 @@ class TranscriptionService:
         finally:
             # Nettoyage des fichiers temporaires
             try:
-                if processed_path and processed_path != file_path and processed_path.exists():
-                    processed_path.unlink()
+                # Nettoyer la version mono
+                if 'processed_path_mono' in locals() and processed_path_mono and processed_path_mono != file_path:
+                    if processed_path_mono.exists():
+                        processed_path_mono.unlink()
                 
+                # Nettoyer la version stéréo si créée
+                if 'processed_path_stereo' in locals() and processed_path_stereo:
+                    if processed_path_stereo.exists():
+                        processed_path_stereo.unlink()
+                
+                # Nettoyer les segments
                 for seg_path in segment_paths:
                     if seg_path.exists():
                         seg_path.unlink()

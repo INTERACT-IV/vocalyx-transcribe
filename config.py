@@ -8,6 +8,13 @@ import logging
 import configparser
 from pathlib import Path
 from typing import Set
+try:
+    import multiprocessing
+    CPU_COUNT = multiprocessing.cpu_count()
+except (ImportError, NotImplementedError):
+    CPU_COUNT = os.cpu_count() or 4  # Fallback à 4 si détection impossible
+
+logger = logging.getLogger("vocalyx")
 
 class Config:
     """Charge et gère la configuration depuis config.ini"""
@@ -139,11 +146,37 @@ class Config:
         )
         
         # PERFORMANCE
+        # Détection automatique du nombre de cores CPU
+        self.cpu_count = CPU_COUNT
+        logger.info(f"🔍 Detected CPU: {self.cpu_count} core(s)")
+        
         self.max_workers = os.environ.get(
             'MAX_WORKERS', 
             self.config.getint('PERFORMANCE', 'max_workers')
         )
-        self.segment_length_ms = self.config.getint('PERFORMANCE', 'segment_length_ms')
+        
+        # Découpage adaptatif : taille des segments selon le CPU
+        # CPU faible (< 4 cores) : 25s (segments plus courts = moins de mémoire)
+        # CPU moyen (4-8 cores) : 35s (équilibre)
+        # CPU puissant (> 8 cores) : 45s (segments plus longs = meilleure parallélisation)
+        base_segment_length_ms = self.config.getint('PERFORMANCE', 'segment_length_ms', fallback=45000)
+        if self.cpu_count < 4:
+            self.segment_length_ms = min(base_segment_length_ms, 25000)  # 25s max pour CPU faible
+            logger.info(f"⚙️ Adaptive segmentation: CPU faible ({self.cpu_count} cores) → segments de 25s")
+        elif self.cpu_count <= 8:
+            self.segment_length_ms = min(base_segment_length_ms, 35000)  # 35s max pour CPU moyen
+            logger.info(f"⚙️ Adaptive segmentation: CPU moyen ({self.cpu_count} cores) → segments de 35s")
+        else:
+            self.segment_length_ms = base_segment_length_ms  # 45s pour CPU puissant
+            logger.info(f"⚙️ Adaptive segmentation: CPU puissant ({self.cpu_count} cores) → segments de 45s")
+        
+        # Nombre optimal de workers parallèles pour transcription
+        # Limiter à 1 worker par core pour éviter la surcharge mémoire
+        # Whisper libère le GIL, donc ThreadPoolExecutor est optimal
+        optimal_parallel_workers = min(self.cpu_count, 8)  # Max 8 workers même pour CPU très puissant
+        # Permettre override via config.ini si nécessaire (désactivé pour l'instant)
+        self.parallel_workers = optimal_parallel_workers
+        logger.info(f"⚙️ Parallel transcription: {self.parallel_workers} worker(s) optimal")
         
         vad_enabled_str = os.environ.get(
             'VAD_ENABLED', 

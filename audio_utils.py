@@ -5,7 +5,7 @@ Utilitaires pour le traitement audio (adapté pour l'architecture microservices)
 
 import logging
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 import soundfile as sf
 from pydub import AudioSegment
@@ -54,38 +54,71 @@ def get_audio_duration(file_path: Path) -> float:
             logger.error(f"❌ Could not get duration: {e2}")
             return 0.0
 
-def preprocess_audio(audio_path: Path) -> Path:
+def preprocess_audio(audio_path: Path, preserve_stereo_for_diarization: bool = True) -> Dict[str, Path]:
     """
     Pré-traite l'audio pour améliorer la qualité de transcription.
     - Normalisation du volume
-    - Conversion en mono
-    - Conversion en 16kHz
+    - Conversion en mono 16kHz pour Whisper
+    - Préservation du stéréo pour diarisation (si stéréo détecté)
     
     Args:
         audio_path: Chemin vers le fichier audio original
+        preserve_stereo_for_diarization: Si True, préserve une version stéréo pour diarisation
         
     Returns:
-        Path: Chemin vers le fichier audio traité
+        Dict avec les clés:
+        - 'mono': Chemin vers la version mono 16kHz (pour Whisper)
+        - 'stereo': Chemin vers la version stéréo préservée (None si mono ou si preserve_stereo_for_diarization=False)
+        - 'is_stereo': Boolean indiquant si l'audio original était stéréo
     """
     try:
         logger.debug(f"Preprocessing audio: {audio_path.name}")
         audio = AudioSegment.from_file(str(audio_path))
         
+        # Détecter si l'audio est stéréo
+        is_stereo = audio.channels == 2
+        logger.info(f"🔍 Audio format detected: {'STEREO' if is_stereo else 'MONO'} ({audio.channels} channel(s))")
+        
         # Normalisation du volume
         audio = normalize(audio)
         
-        # Conversion en mono 16kHz (optimal pour Whisper)
-        audio = audio.set_channels(1).set_frame_rate(16000)
+        # Version mono pour Whisper (toujours créée)
+        audio_mono = audio.set_channels(1).set_frame_rate(16000)
+        mono_path = audio_path.parent / f"{audio_path.stem}_processed_mono.wav"
+        audio_mono.export(str(mono_path), format="wav")
         
-        # Export
-        output_path = audio_path.parent / f"{audio_path.stem}_processed.wav"
-        audio.export(str(output_path), format="wav")
+        result = {
+            'mono': mono_path,
+            'stereo': None,
+            'is_stereo': is_stereo
+        }
         
-        logger.info(f"✅ Audio preprocessed: {output_path.name}")
-        return output_path
+        # Version stéréo pour diarisation (si stéréo détecté et préservation demandée)
+        if is_stereo and preserve_stereo_for_diarization:
+            # Préserver le stéréo avec normalisation mais sans conversion de sample rate
+            # pyannote.audio peut gérer différents sample rates
+            audio_stereo = audio.set_frame_rate(16000)  # 16kHz mais stéréo préservé
+            stereo_path = audio_path.parent / f"{audio_path.stem}_processed_stereo.wav"
+            audio_stereo.export(str(stereo_path), format="wav")
+            result['stereo'] = stereo_path
+            logger.info(f"✅ Preserved STEREO version for diarization: {stereo_path.name}")
+            logger.info(f"   💡 STEREO audio: one channel per speaker (optimized for diarization)")
+        else:
+            if is_stereo and not preserve_stereo_for_diarization:
+                logger.info(f"ℹ️ STEREO detected but preservation disabled")
+            else:
+                logger.info(f"ℹ️ MONO audio: using mono version for both transcription and diarization")
+        
+        logger.info(f"✅ Audio preprocessed: {mono_path.name}")
+        return result
     except Exception as e:
         logger.warning(f"⚠️ Preprocessing failed, using original: {e}")
-        return audio_path
+        # Fallback : retourner l'original comme mono
+        return {
+            'mono': audio_path,
+            'stereo': None,
+            'is_stereo': False
+        }
 
 def detect_speech_segments(
     audio_path: Path,
@@ -126,22 +159,22 @@ def detect_speech_segments(
 def split_audio_intelligent(
     file_path: Path,
     use_vad: bool = True,
-    segment_length_ms: int = 45000,
+    segment_length_ms: Optional[int] = None,
     vad_min_silence_len: int = 500,
     vad_silence_thresh: int = -40
 ) -> List[Path]:
     """
-    Découpe l'audio de manière intelligente.
+    Découpe l'audio de manière intelligente avec taille adaptative.
     
     Stratégies :
     - Audio court (< 60s) : pas de découpe
     - Audio moyen avec VAD : découpe selon les segments de parole
-    - Audio long sans VAD : découpe par durée fixe
+    - Audio long sans VAD : découpe par durée fixe (adaptative selon CPU)
     
     Args:
         file_path: Chemin vers le fichier audio
         use_vad: Utiliser la détection de voix (default: True)
-        segment_length_ms: Longueur des segments en ms (default: 45000)
+        segment_length_ms: Longueur des segments en ms (default: None = 45000 si non fourni)
         vad_min_silence_len: VAD - Durée min de silence en ms (default: 500)
         vad_silence_thresh: VAD - Seuil de silence en dB (default: -40)
         
@@ -149,6 +182,10 @@ def split_audio_intelligent(
         List[Path]: Liste des chemins vers les segments audio
     """
     segment_paths = []
+    
+    # Utiliser valeur par défaut si non fournie
+    if segment_length_ms is None:
+        segment_length_ms = 45000  # Valeur par défaut (sera override par config si disponible)
     
     try:
         audio = AudioSegment.from_file(str(file_path))
