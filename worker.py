@@ -14,8 +14,10 @@ from celery.worker.control import Panel
 
 from celery import Celery
 from config import Config
-from transcription_service import TranscriptionService
-from api_client import VocalyxAPIClient
+from transcription_service import TranscriptionService  # Compatibilité
+from api_client import VocalyxAPIClient  # Compatibilité
+from infrastructure.api.api_client import VocalyxAPIClient as VocalyxAPIClientRefactored
+from application.services.transcription_worker_service import TranscriptionWorkerService
 
 config = Config()
 
@@ -60,12 +62,17 @@ def on_worker_init(**kwargs):
 
 
 def get_api_client():
-    """Charge le client API (une fois par worker)"""
+    """Charge le client API (une fois par worker) - Version refactorisée"""
     global _api_client
     if _api_client is None:
         logger.info(f"Initialisation du client API pour ce worker ({config.instance_name})...")
-        _api_client = VocalyxAPIClient(config)
+        _api_client = VocalyxAPIClientRefactored(config)
     return _api_client
+
+def get_worker_service():
+    """Charge le service worker (une fois par worker)"""
+    api_client = get_api_client()
+    return TranscriptionWorkerService(api_client)
 
 def get_transcription_service(model_name: str = 'small'):
     """

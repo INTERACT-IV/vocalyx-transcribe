@@ -1,216 +1,178 @@
-# vocalyx-transcribe
+# Vocalyx Transcribe
 
-Worker Celery pour la transcription audio avec Faster-Whisper.
+Workers Celery pour la transcription audio avec Whisper et la diarisation des locuteurs.
 
-## 🎯 Rôle
+## Description
 
-- **Consommateur** des tâches Celery depuis la queue Redis
-- Exécution des transcriptions avec Faster-Whisper
-- Communication avec `vocalyx-api` via HTTP pour récupérer et mettre à jour les transcriptions
-- Scalable horizontalement (plusieurs workers possibles)
+Module worker de Vocalyx exécutant les tâches de transcription audio de manière distribuée. Utilise Whisper (OpenAI) pour la transcription et Pyannote pour la diarisation des locuteurs. Implémente un cache de modèles pour optimiser les performances.
 
-## 🏗️ Architecture
+## Architecture
+
+### Structure
 
 ```
 vocalyx-transcribe/
-├── transcribe/
-│   ├── __init__.py
-│   └── audio_utils.py         # Utilitaires audio (VAD, découpe)
-├── logs/                       # Répertoire des logs
-├── models/                     # Modèles Whisper (peut être monté en volume)
-├── shared_uploads/             # Uploads partagés avec l'API
-├── worker.py                   # Point d'entrée Celery Worker
-├── api_client.py               # Client HTTP vers vocalyx-api
-├── transcription_service.py    # Service de transcription Whisper
-├── config.py                   # Configuration
-├── logging_config.py           # Configuration du logging
-├── requirements.txt
-├── Dockerfile
-└── config.ini
+├── worker.py                    # Point d'entrée Celery
+├── transcription_service.py     # Service de transcription Whisper
+├── audio_utils.py               # Utilitaires de traitement audio
+├── diarization.py               # Service de diarisation Pyannote
+├── application/
+│   └── services/
+│       └── transcription_worker_service.py  # Service métier
+├── infrastructure/
+│   └── api/
+│       └── api_client.py        # Client API
+└── config.py                    # Configuration
 ```
 
-## 🚀 Installation
+### Fonctionnalités
 
-### Prérequis
+- **Transcription audio** : Conversion audio → texte avec Whisper
+- **Diarisation** : Identification et séparation des locuteurs
+- **Traitement audio** : VAD (Voice Activity Detection), segmentation
+- **Cache de modèles** : Réutilisation des modèles Whisper chargés
+- **Traitement parallèle** : Segmentation et transcription en parallèle
+- **Monitoring** : Statistiques de performance et santé du worker
 
-- Python 3.10+
-- Redis (pour Celery)
-- vocalyx-api en cours d'exécution
-- FFmpeg (pour le traitement audio)
+## Dépendances principales
 
-### Installation locale
+### Celery
+Système de files d'attente distribuées pour l'exécution asynchrone de tâches. Gère la distribution des transcriptions entre plusieurs workers.
 
-```bash
-# Cloner le dépôt
-git clone <repository>
-cd vocalyx-transcribe
+### faster-whisper
+Implémentation optimisée de Whisper utilisant CTranslate2. Fournit des performances améliorées par rapport à l'implémentation originale OpenAI.
 
-# Créer un environnement virtuel
-python3.10 -m venv venv
-source venv/bin/activate
+### PyTorch
+Framework de deep learning pour Pyannote. Utilisé pour la diarisation des locuteurs et la segmentation audio.
 
-# Installer les dépendances
-pip install -r requirements.txt
+### pyannote.audio
+Bibliothèque Python pour la diarisation des locuteurs. Identifie et sépare les différents locuteurs dans un enregistrement audio.
 
-# Télécharger le modèle Whisper (si pas déjà fait)
-# Il sera téléchargé automatiquement au premier lancement
+### soundfile / pydub
+Bibliothèques de traitement audio. `soundfile` pour la lecture/écriture de fichiers audio, `pydub` pour les opérations de manipulation audio.
 
-# Configurer
-cp config.ini config.local.ini
-# Éditer config.local.ini
+### av (PyAV)
+Wrapper Python pour FFmpeg. Utilisé pour le décodage et l'encodage de formats audio/vidéo.
 
-# Lancer le worker
-python worker.py
+### httpx
+Client HTTP pour communiquer avec l'API centrale. Récupère les métadonnées des transcriptions et envoie les résultats.
 
-# OU avec Celery directement
-celery -A worker.celery_app worker --loglevel=info --concurrency=2
+### psutil
+Bibliothèque de monitoring système. Utilisée pour collecter les statistiques CPU/RAM du worker.
+
+### redis
+Client Redis pour la connexion au broker Celery. Utilisé pour recevoir et traiter les tâches.
+
+## Configuration
+
+Variables d'environnement principales :
+
+- `INSTANCE_NAME` : Nom d'identification du worker
+- `VOCALYX_API_URL` : URL de l'API centrale
+- `CELERY_BROKER_URL` : URL du broker Celery
+- `CELERY_RESULT_BACKEND` : Backend de résultats Celery
+- `WHISPER_MODEL` : Chemin ou nom du modèle Whisper
+- `WHISPER_DEVICE` : Device (cpu, cuda)
+- `WHISPER_COMPUTE_TYPE` : Type de calcul (int8, float16, float32)
+- `WHISPER_LANGUAGE` : Langue par défaut (fr, en, etc.)
+- `MAX_WORKERS` : Nombre de workers parallèles
+- `VAD_ENABLED` : Activation du VAD
+- `LOG_LEVEL` : Niveau de logging
+
+## Tâche Celery
+
+### transcribe_audio_task
+
+Tâche principale exécutée par le worker :
+
+1. **Récupération** : Récupère les métadonnées de la transcription depuis l'API
+2. **Préparation** : Charge le modèle Whisper (avec cache)
+3. **Traitement audio** : Prétraitement (mono/stéréo, segmentation)
+4. **Transcription** : Exécute Whisper sur l'audio
+5. **Diarisation** : Optionnellement, identifie les locuteurs
+6. **Sauvegarde** : Envoie les résultats à l'API
+
+### Paramètres
+
+- `transcription_id` : Identifiant de la transcription
+- `max_retries` : Nombre de tentatives en cas d'échec (3)
+- `soft_time_limit` : Limite de temps douce (1800s)
+- `time_limit` : Limite de temps dure (2100s)
+
+## Traitement audio
+
+### Préprocessing
+
+- **Détection du format** : Mono ou stéréo
+- **Conversion mono** : Pour Whisper (mono requis)
+- **Préservation stéréo** : Pour la diarisation (si activée)
+- **Normalisation** : Ajustement des niveaux audio
+
+### Segmentation
+
+Segmentation adaptative selon la durée :
+- **Court** (< 60s) : Pas de découpe
+- **Moyen** (60-300s) : Découpe en 2 segments
+- **Long** (> 300s) : Découpe en plusieurs segments
+
+La taille des segments s'adapte également au CPU disponible.
+
+### VAD (Voice Activity Detection)
+
+Détection automatique des segments de parole pour :
+- Éviter de transcrire les silences
+- Améliorer la précision
+- Réduire le temps de traitement
+
+## Cache de modèles
+
+Système de cache LRU pour les modèles Whisper :
+
+- **Limite** : 2 modèles en cache maximum
+- **Réutilisation** : Évite le rechargement (5-15s économisées)
+- **Gestion mémoire** : Suppression automatique du moins récent
+
+## Diarisation
+
+Service optionnel utilisant Pyannote pour :
+
+- **Identification des locuteurs** : Détection du nombre de locuteurs
+- **Segmentation temporelle** : Attribution des segments aux locuteurs
+- **Optimisation stéréo** : Utilisation optimale des canaux stéréo
+
+Nécessite les modèles Pyannote dans `shared/models/`.
+
+## Monitoring
+
+Le worker expose des statistiques via Celery control :
+
+- **CPU** : Pourcentage d'utilisation
+- **Mémoire** : RSS et pourcentage
+- **Uptime** : Temps de fonctionnement
+- **Statistiques métier** : Audio traité, temps de traitement
+
+## Logs
+
+Les logs sont écrits dans `./shared/logs/vocalyx-transcribe-<instance>.log` avec le format :
+
+```
+%(asctime)s [%(levelname)s] %(name)s: %(message)s
 ```
 
-## 🐳 Docker
+Voir `DOCUMENTATION_LOGS.md` pour la documentation complète des logs.
 
-```bash
-# Build
-docker build -t vocalyx-transcribe .
+## Performance
 
-# Run
-docker run \
-  -e CELERY_BROKER_URL="redis://redis:6379/0" \
-  -e VOCALYX_API_URL="http://vocalyx-api:8000" \
-  -v $(pwd)/shared_uploads:/app/shared_uploads \
-  -v $(pwd)/models:/app/models \
-  vocalyx-transcribe
-```
+### Optimisations
 
-## ⚙️ Configuration
+- **Cache de modèles** : Réduction du temps de chargement
+- **Traitement parallèle** : Utilisation de plusieurs workers
+- **Segmentation adaptative** : Optimisation selon la durée
+- **VAD** : Réduction du temps de traitement
 
-### Paramètres Principaux
+### Ressources
 
-#### Model Whisper
-```ini
-[WHISPER]
-model = ./models/openai-whisper-small  # tiny, base, small, medium, large-v3
-device = cpu                            # cpu, cuda
-compute_type = int8                     # int8, float16, float32
-language = fr                           # fr, en, es, etc.
-```
+- **Mémoire** : 4-8 GB recommandés par worker
+- **CPU** : Multi-core recommandé pour le traitement parallèle
+- **Stockage** : Espace pour les modèles (~2-5 GB par modèle)
 
-#### Performance
-```ini
-[PERFORMANCE]
-max_workers = 2          # Concurrence Celery
-vad_enabled = true       # Voice Activity Detection
-beam_size = 5            # Qualité du décodage
-```
-
-#### API
-```ini
-[API]
-url = http://localhost:8000    # URL de vocalyx-api
-```
-
-#### Celery
-```ini
-[CELERY]
-broker_url = redis://localhost:6379/0
-result_backend = redis://localhost:6379/0
-```
-
-## 🔄 Flux de Travail
-
-```
-1. Worker démarre et se connecte à Redis
-2. Worker attend une tâche "transcribe_audio"
-3. Tâche reçue avec transcription_id
-4. Worker → API: GET /api/transcriptions/{id} (récupérer infos)
-5. Worker → API: PATCH /api/transcriptions/{id} (status=processing)
-6. Worker exécute la transcription Whisper
-7. Worker → API: PATCH /api/transcriptions/{id} (résultats + status=done)
-8. Worker attend la prochaine tâche
-```
-
-## 📊 Monitoring
-
-### Logs
-```bash
-# Logs du worker
-tail -f logs/vocalyx-transcribe.log
-```
-
-### Celery Flower (optionnel)
-```bash
-# Démarrer Flower pour monitoring web
-celery -A worker.celery_app flower --port=5555
-
-# Accéder: http://localhost:5555
-```
-
-### Commandes Celery Utiles
-```bash
-# Voir les workers actifs
-celery -A worker.celery_app inspect active
-
-# Voir les tâches en attente
-celery -A worker.celery_app inspect reserved
-
-# Statistiques
-celery -A worker.celery_app inspect stats
-
-# Arrêter tous les workers
-celery -A worker.celery_app control shutdown
-```
-
-## 🔧 Scalabilité
-
-### Lancer plusieurs workers
-
-```bash
-# Worker 1
-INSTANCE_NAME=worker-01 python worker.py
-
-# Worker 2 (autre terminal)
-INSTANCE_NAME=worker-02 python worker.py
-
-# Worker 3 (autre terminal)
-INSTANCE_NAME=worker-03 python worker.py
-```
-
-Ou avec Docker Compose (voir docker-compose.yml dans la racine).
-
-### Stratégies de Scalabilité
-
-1. **Horizontal** : Ajouter plus de workers
-2. **Vertical** : Augmenter `max_workers` (concurrence Celery)
-3. **GPU** : Utiliser `device=cuda` pour des transcriptions plus rapides
-
-## 🚨 Gestion des Erreurs
-
-Le worker gère automatiquement :
-- **Retry** : 3 tentatives avec 60s entre chaque
-- **Crash** : Celery re-enqueue automatiquement la tâche
-- **API indisponible** : Le worker continue mais logge l'erreur
-- **Fichier manquant** : Marque la transcription en erreur
-
-## 🔒 Sécurité
-
-### Communication avec l'API
-
-Le worker utilise une clé interne (`X-Internal-Key`) pour communiquer avec vocalyx-api.
-
-```ini
-[SECURITY]
-internal_api_key = SECRET_KEY_HERE
-```
-
-**⚠️ Cette clé DOIT être identique à celle configurée dans vocalyx-api.**
-
-## 📝 Changelog
-
-### Version 1.0.0
-- Architecture microservices (worker Celery)
-- Communication HTTP avec vocalyx-api
-- Plus d'accès direct à la base de données
-- Support multi-workers natif
-
-## 📄 Licence
-
-Propriétaire - Guilhem RICHARD
