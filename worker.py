@@ -286,8 +286,14 @@ def transcribe_audio_task(self, transcription_id: str):
         # 4. Mettre à jour avec les résultats
         logger.info(f"[{transcription_id}] 💾 Saving results to API...")
         import json
+        enrichment_requested = transcription.get('enrichment_requested', False)
+        
+        # Si l'enrichissement est demandé, mettre le statut à "transcribed" au lieu de "done"
+        # Le statut sera changé à "done" uniquement quand l'enrichissement sera terminé
+        status = "transcribed" if enrichment_requested else "done"
+        
         api_client.update_transcription(transcription_id, {
-            "status": "done",
+            "status": status,
             "text": result["text"],
             "segments": json.dumps(result["segments"]),
             "language": result["language"],
@@ -296,14 +302,40 @@ def transcribe_audio_task(self, transcription_id: str):
             "segments_count": len(result["segments"])
         })
         
-        logger.info(f"[{transcription_id}] 💾 Results saved to API")
+        logger.info(f"[{transcription_id}] 💾 Results saved to API (status: {status})")
+        
+        # 5. Si l'enrichissement est demandé, déclencher la tâche d'enrichissement
+        if enrichment_requested:
+            try:
+                logger.info(f"[{transcription_id}] 🤖 Enrichment requested, triggering enrichment task...")
+                # Importer la tâche d'enrichissement depuis celery_app
+                from celery import current_app as celery_current_app
+                enrich_task = celery_current_app.send_task(
+                    'enrich_transcription',
+                    args=[transcription_id],
+                    queue='enrichment',  # Utiliser la queue d'enrichissement
+                    countdown=1  # Démarrer après 1 seconde
+                )
+                logger.info(f"[{transcription_id}] ✅ Enrichment task enqueued: {enrich_task.id}")
+            except Exception as enrich_error:
+                logger.warning(f"[{transcription_id}] ⚠️ Failed to enqueue enrichment task: {enrich_error}")
+                # Ne pas échouer la transcription si l'enrichissement échoue à être enqueuée
+                # On met simplement le statut d'enrichissement en erreur
+                try:
+                    api_client.update_transcription(transcription_id, {
+                        "enrichment_status": "error",
+                        "enrichment_error": f"Failed to enqueue enrichment: {str(enrich_error)}"
+                    })
+                except:
+                    pass
         
         return {
             "status": "success",
             "transcription_id": transcription_id,
             "duration": result["duration"],
             "processing_time": processing_time,
-            "segments_count": len(result["segments"])
+            "segments_count": len(result["segments"]),
+            "enrichment_triggered": enrichment_requested
         }
         
     except Exception as e:
