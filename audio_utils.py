@@ -161,14 +161,15 @@ def split_audio_intelligent(
     use_vad: bool = True,
     segment_length_ms: Optional[int] = None,
     vad_min_silence_len: int = 500,
-    vad_silence_thresh: int = -40
+    vad_silence_thresh: int = -40,
+    force_split_for_distribution: bool = False
 ) -> List[Path]:
     """
     Découpe l'audio de manière intelligente avec taille adaptative.
     Optimisé Phase 3 : Réduction de la consommation mémoire.
     
     Stratégies :
-    - Audio court (< 60s) : pas de découpe
+    - Audio court (< 60s) : pas de découpe (sauf si force_split_for_distribution=True)
     - Audio avec VAD : Découpe temporelle simple (faster-whisper gère le VAD intégré)
     - Audio long sans VAD : découpe par durée fixe (adaptative selon CPU)
     
@@ -178,6 +179,7 @@ def split_audio_intelligent(
         segment_length_ms: Longueur des segments en ms (default: None = 45000 si non fourni)
         vad_min_silence_len: VAD - Durée min de silence en ms (non utilisé si use_vad=True, faster-whisper le gère)
         vad_silence_thresh: VAD - Seuil de silence en dB (non utilisé si use_vad=True, faster-whisper le gère)
+        force_split_for_distribution: Si True, force la découpe même pour les audios courts (pour distribution)
         
     Returns:
         List[Path]: Liste des chemins vers les segments audio
@@ -202,10 +204,19 @@ def split_audio_intelligent(
             duration_s = duration_ms / 1000
             del audio  # Libérer immédiatement la mémoire
         
-        # Audio court (< 60s) : pas de découpe
-        if duration_s < 60:
+        # Audio court (< 60s) : pas de découpe (sauf si force_split_for_distribution)
+        if duration_s < 60 and not force_split_for_distribution:
             logger.info(f"📊 Audio court ({duration_s:.1f}s), pas de découpe")
             return [file_path]
+        
+        # Si force_split_for_distribution, utiliser une taille de segment plus petite pour les audios courts
+        if force_split_for_distribution and duration_s < 60:
+            # Pour les audios courts en mode distribué, utiliser des segments de 20-25s
+            # Cela permet de mieux distribuer même les audios courts qui génèrent beaucoup de segments Whisper
+            adaptive_segment_length_ms = min(segment_length_ms, int(duration_s * 1000 / 2))  # Au moins 2 segments
+            adaptive_segment_length_ms = max(adaptive_segment_length_ms, 20000)  # Minimum 20s
+            logger.info(f"📊 Audio court ({duration_s:.1f}s) en mode distribué, découpe forcée avec segments de {adaptive_segment_length_ms}ms")
+            segment_length_ms = adaptive_segment_length_ms
         
         # Phase 3 - Optimisation : Si VAD activé, utiliser découpe temporelle simple
         # faster-whisper gère déjà le VAD intégré, pas besoin de detect_speech_segments

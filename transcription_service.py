@@ -56,7 +56,7 @@ class TranscriptionService:
         
         # Si c'est un nom simple (tiny, base, small, medium), construire le chemin
         if model_path in ["tiny", "base", "small", "medium", "large"]:
-            model_path = f"./models/openai-whisper-{self.model_name}"
+            model_path = f"./models/transcribe/openai-whisper-{self.model_name}"
         
         # Convertir les chemins relatifs en chemins absolus
         # faster-whisper interprète les chemins relatifs comme des repo_id HuggingFace

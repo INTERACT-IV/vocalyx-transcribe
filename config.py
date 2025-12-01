@@ -48,7 +48,7 @@ class Config:
         }
         
         config['WHISPER'] = {
-            'model': './models/openai-whisper-small',
+            'model': './models/transcribe/openai-whisper-small',
             'device': 'cpu',
             'compute_type': 'int8',
             'cpu_threads': '8',
@@ -80,7 +80,7 @@ class Config:
         config['DIARIZATION'] = {
             'enabled': 'false',
             'model': 'pyannote/speaker-diarization-3.1',
-            'model_path': '/app/models/pyannote-speaker-diarization',
+            'model_path': '/app/models/transcribe/pyannote-speaker-diarization',
             'hf_token': ''
         }
         
@@ -238,7 +238,7 @@ class Config:
         )
         self.diarization_model_path = os.environ.get(
             'DIARIZATION_MODEL_PATH',
-            self.config.get('DIARIZATION', 'model_path', fallback='/app/models/pyannote-speaker-diarization')
+            self.config.get('DIARIZATION', 'model_path', fallback='/app/models/transcribe/pyannote-speaker-diarization')
         )
         self.hf_token = os.environ.get(
             'HF_TOKEN',

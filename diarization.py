@@ -12,14 +12,52 @@ logger = logging.getLogger("vocalyx")
 # Import conditionnel de torch (nécessaire pour pyannote.audio)
 try:
     import torch
+    # Patcher torch.load pour PyTorch 2.6+ (weights_only=True par défaut)
+    # Les modèles Pyannote nécessitent weights_only=False ou l'ajout de safe_globals
+    if hasattr(torch, 'load') and not hasattr(torch, '_vocalyx_torch_load_patched'):
+        original_torch_load = torch.load
+        
+        # Pour PyTorch 2.6+, ajouter TorchVersion aux safe_globals (méthode recommandée)
+        try:
+            if hasattr(torch, 'serialization') and hasattr(torch.serialization, 'add_safe_globals'):
+                try:
+                    from torch.torch_version import TorchVersion
+                    torch.serialization.add_safe_globals([TorchVersion])
+                    logger.debug("✅ Added TorchVersion to torch.serialization safe_globals for PyTorch 2.6+")
+                except ImportError:
+                    # TorchVersion peut ne pas être importable directement
+                    pass
+        except (AttributeError, TypeError):
+            # Si add_safe_globals n'existe pas, on utilisera weights_only=False
+            pass
+        
+        def patched_torch_load(*args, **kwargs):
+            # Si weights_only n'est pas spécifié, le définir à False pour compatibilité
+            # avec les modèles Pyannote qui contiennent des objets TorchVersion
+            if 'weights_only' not in kwargs:
+                kwargs['weights_only'] = False
+            return original_torch_load(*args, **kwargs)
+        
+        torch.load = patched_torch_load
+        torch._vocalyx_torch_load_patched = True
+        # Log seulement si le logger est déjà configuré (évite les logs trop tôt)
+        try:
+            logger.debug("✅ Patched torch.load for PyTorch 2.6+ compatibility (weights_only=False)")
+        except:
+            pass
 except ImportError:
     torch = None
-    logger.warning("⚠️ torch not installed. Diarization will not be available.")
+    try:
+        logger.warning("⚠️ torch not installed. Diarization will not be available.")
+    except:
+        pass
 
 # Mapping des modèles HuggingFace vers les chemins locaux (partagé)
 _MODEL_MAPPING = {
-    'pyannote/speaker-diarization-community-1': '/app/models/pyannote-speaker-diarization-community-1',
-    'pyannote/wespeaker-voxceleb-resnet34-LM': '/app/models/pyannote-wespeaker-voxceleb-resnet34-LM',
+    'pyannote/speaker-diarization-community-1': '/app/models/transcribe/pyannote-speaker-diarization-community-1',
+    'pyannote/wespeaker-voxceleb-resnet34-LM': '/app/models/transcribe/pyannote-wespeaker-voxceleb-resnet34-LM',
+    'pyannote/segmentation': '/app/models/transcribe/pyannote-segmentation',
+    'pyannote/segmentation-3.1': '/app/models/transcribe/pyannote-segmentation',
 }
 
 def _find_local_model_file(repo_id: str, filename: str) -> Optional[Path]:
@@ -155,19 +193,34 @@ class DiarizationService:
                 # Si c'est un fichier .bin, on garde le répertoire parent
                 if model_name.endswith('.bin') or model_name.endswith('.pth'):
                     parent_dir = old_path.split('/')[-2]
-                    new_path = f'/app/models/{parent_dir}/{model_name}'
+                    new_path = f'/app/models/transcribe/{parent_dir}/{model_name}'
                 else:
-                    new_path = f'/app/models/{model_name}'
+                    new_path = f'/app/models/transcribe/{model_name}'
                 logger.info(f"🔧 Fixing path: {old_path} -> {new_path}")
                 return new_path
             
             content = re.sub(pattern, replace_path, content)
             
+            # 1.5. Corriger les chemins /app/models/... qui manquent /transcribe/
+            # Pattern pour détecter /app/models/pyannote-... (sans /transcribe/)
+            pattern_missing_transcribe = r'(/app/models/(pyannote-[^\s\'"/]+))'
+            
+            def fix_missing_transcribe(match):
+                old_path = match.group(1)
+                model_name = match.group(2)
+                new_path = f'/app/models/transcribe/{model_name}'
+                logger.info(f"🔧 Fixing missing /transcribe/ path: {old_path} -> {new_path}")
+                return new_path
+            
+            content = re.sub(pattern_missing_transcribe, fix_missing_transcribe, content)
+            
             # 2. Remplacer les références HuggingFace par des chemins locaux (mode offline)
             # Pattern pour détecter pyannote/... ou d'autres références HuggingFace
             hf_patterns = [
-                (r'pyannote/wespeaker-voxceleb-resnet34-LM', '/app/models/pyannote-wespeaker-voxceleb-resnet34-LM'),
-                (r'pyannote/speaker-diarization-community-1', '/app/models/pyannote-speaker-diarization-community-1'),
+                (r'pyannote/wespeaker-voxceleb-resnet34-LM', '/app/models/transcribe/pyannote-wespeaker-voxceleb-resnet34-LM'),
+                (r'pyannote/speaker-diarization-community-1', '/app/models/transcribe/pyannote-speaker-diarization-community-1'),
+                (r'pyannote/segmentation', '/app/models/transcribe/pyannote-segmentation'),
+                (r'pyannote/segmentation-3\.1', '/app/models/transcribe/pyannote-segmentation'),
             ]
             
             for pattern, replacement in hf_patterns:
@@ -205,6 +258,42 @@ class DiarizationService:
                     
                     def patched_hf_hub_download(repo_id, filename, **kwargs):
                         logger.info(f"🔍 huggingface_hub.hf_hub_download called: repo_id={repo_id}, filename={filename}")
+                        
+                        # Détecter si repo_id est en fait un chemin local (commence par / ou ./)
+                        if isinstance(repo_id, str) and (repo_id.startswith('/') or repo_id.startswith('./')):
+                            # C'est un chemin local, pas un repo_id HuggingFace
+                            local_file_path = Path(repo_id)
+                            if local_file_path.exists():
+                                logger.info(f"🔧 Detected local file path, returning directly: {local_file_path}")
+                                return str(local_file_path)
+                            else:
+                                # Si le chemin n'existe pas, essayer avec filename comme suffixe
+                                local_file_path = Path(repo_id) / filename if filename else Path(repo_id)
+                                if local_file_path.exists():
+                                    logger.info(f"🔧 Detected local file path with filename, returning: {local_file_path}")
+                                    return str(local_file_path)
+                                
+                                # Si toujours pas trouvé, essayer de corriger le chemin en ajoutant /transcribe/
+                                # Ex: /app/models/pyannote-segmentation -> /app/models/transcribe/pyannote-segmentation
+                                if '/app/models/' in repo_id and '/transcribe/' not in repo_id:
+                                    # Extraire le nom du modèle du chemin
+                                    parts = repo_id.replace('/app/models/', '').split('/')
+                                    if parts:
+                                        model_name = parts[0]
+                                        corrected_path = Path(f'/app/models/transcribe/{model_name}')
+                                        if filename:
+                                            corrected_file = corrected_path / filename
+                                        else:
+                                            corrected_file = corrected_path
+                                        
+                                        if corrected_file.exists():
+                                            logger.info(f"🔧 Corrected path from {repo_id} to {corrected_file}")
+                                            return str(corrected_file)
+                                
+                                logger.warning(f"⚠️ Local path not found: {repo_id}")
+                                raise FileNotFoundError(f"Local model file not found: {repo_id}")
+                        
+                        # Sinon, traiter comme un repo_id HuggingFace normal
                         local_path = _find_local_model_file(repo_id, filename)
                         if local_path:
                             logger.info(f"🔧 Redirecting hf_hub_download {repo_id}/{filename} to local file: {local_path}")
@@ -492,8 +581,8 @@ class DiarizationService:
             logger.info(f"🔍 Checking diarization model path: {model_path}")
             
             if not model_path:
-                # Par défaut, chercher dans /app/models/pyannote-speaker-diarization (chemin dans le container Docker)
-                default_model_path = Path('/app/models/pyannote-speaker-diarization')
+                # Par défaut, chercher dans /app/models/transcribe/pyannote-speaker-diarization (chemin dans le container Docker)
+                default_model_path = Path('/app/models/transcribe/pyannote-speaker-diarization')
                 logger.info(f"🔍 Checking default path: {default_model_path}")
                 logger.info(f"🔍 Path exists: {default_model_path.exists()}")
                 if default_model_path.exists():
@@ -523,11 +612,17 @@ class DiarizationService:
                         os.environ['HF_HUB_OFFLINE'] = '1'
                         os.environ['TRANSFORMERS_OFFLINE'] = '1'
                         
+                        # Forcer PyTorch à utiliser weights_only=False pour compatibilité avec Pyannote
+                        # (PyTorch 2.6+ utilise weights_only=True par défaut)
+                        os.environ['TORCH_LOAD_WEIGHTS_ONLY'] = '0'
+                        
                         # Mapper les modèles HuggingFace vers les chemins locaux
                         # Cela permet d'intercepter les appels aux modèles gated
                         model_mapping = {
-                            'pyannote/speaker-diarization-community-1': '/app/models/pyannote-speaker-diarization-community-1',
-                            'pyannote/wespeaker-voxceleb-resnet34-LM': '/app/models/pyannote-wespeaker-voxceleb-resnet34-LM',
+                            'pyannote/speaker-diarization-community-1': '/app/models/transcribe/pyannote-speaker-diarization-community-1',
+                            'pyannote/wespeaker-voxceleb-resnet34-LM': '/app/models/transcribe/pyannote-wespeaker-voxceleb-resnet34-LM',
+                            'pyannote/segmentation': '/app/models/transcribe/pyannote-segmentation',
+                            'pyannote/segmentation-3.1': '/app/models/transcribe/pyannote-segmentation',
                         }
                         
                         # Patcher temporairement le système de chargement HuggingFace
@@ -559,6 +654,43 @@ class DiarizationService:
                                 
                                 def patched_hf_hub_download(repo_id, filename, **kwargs):
                                     logger.info(f"🔍 hf_hub_download called: repo_id={repo_id}, filename={filename}")
+                                    
+                                    # Détecter si repo_id est en fait un chemin local (commence par / ou ./)
+                                    if isinstance(repo_id, str) and (repo_id.startswith('/') or repo_id.startswith('./')):
+                                        # C'est un chemin local, pas un repo_id HuggingFace
+                                        local_file_path = PathLib(repo_id)
+                                        if local_file_path.exists():
+                                            logger.info(f"🔧 Detected local file path, returning directly: {local_file_path}")
+                                            return str(local_file_path)
+                                        else:
+                                            # Si le chemin n'existe pas, essayer avec filename comme suffixe
+                                            if filename:
+                                                local_file_path = PathLib(repo_id) / filename
+                                                if local_file_path.exists():
+                                                    logger.info(f"🔧 Detected local file path with filename, returning: {local_file_path}")
+                                                    return str(local_file_path)
+                                            
+                                            # Si toujours pas trouvé, essayer de corriger le chemin en ajoutant /transcribe/
+                                            # Ex: /app/models/pyannote-segmentation -> /app/models/transcribe/pyannote-segmentation
+                                            if '/app/models/' in repo_id and '/transcribe/' not in repo_id:
+                                                # Extraire le nom du modèle du chemin
+                                                parts = repo_id.replace('/app/models/', '').split('/')
+                                                if parts:
+                                                    model_name = parts[0]
+                                                    corrected_path = PathLib(f'/app/models/transcribe/{model_name}')
+                                                    if filename:
+                                                        corrected_file = corrected_path / filename
+                                                    else:
+                                                        corrected_file = corrected_path
+                                                    
+                                                    if corrected_file.exists():
+                                                        logger.info(f"🔧 Corrected path from {repo_id} to {corrected_file}")
+                                                        return str(corrected_file)
+                                            
+                                            logger.warning(f"⚠️ Local path not found: {repo_id}")
+                                            raise FileNotFoundError(f"Local model file not found: {repo_id}")
+                                    
+                                    # Sinon, traiter comme un repo_id HuggingFace normal
                                     # Si le modèle est dans notre mapping, construire le chemin local
                                     if repo_id in model_mapping:
                                         local_path = PathLib(model_mapping[repo_id]) / filename
@@ -965,15 +1097,76 @@ class DiarizationService:
                             logger.warning(f"⚠️ Could not patch HuggingFace loaders: {e}, will rely on environment variables")
                         
                         try:
+                            # S'assurer que torch.load est bien patché avant de charger le modèle
+                            if torch is not None:
+                                # Vérifier que le patch est appliqué
+                                if not hasattr(torch, '_vocalyx_torch_load_patched'):
+                                    # Re-appliquer le patch si nécessaire
+                                    original_torch_load = torch.load
+                                    def patched_torch_load(*args, **kwargs):
+                                        if 'weights_only' not in kwargs:
+                                            kwargs['weights_only'] = False
+                                        return original_torch_load(*args, **kwargs)
+                                    torch.load = patched_torch_load
+                                    torch._vocalyx_torch_load_patched = True
+                                    logger.info("✅ Re-applied torch.load patch before model loading")
+                                
+                                # Ajouter TorchVersion aux safe_globals si disponible (PyTorch 2.6+)
+                                try:
+                                    if hasattr(torch, 'serialization') and hasattr(torch.serialization, 'add_safe_globals'):
+                                        try:
+                                            from torch.torch_version import TorchVersion
+                                            # Vérifier si déjà ajouté pour éviter les doublons
+                                            if not hasattr(torch.serialization, '_vocalyx_safe_globals_added'):
+                                                torch.serialization.add_safe_globals([TorchVersion])
+                                                torch.serialization._vocalyx_safe_globals_added = True
+                                                logger.info("✅ Added TorchVersion to safe_globals for PyTorch 2.6+")
+                                        except ImportError:
+                                            logger.warning("⚠️ Could not import TorchVersion, will use weights_only=False")
+                                except (AttributeError, TypeError) as e:
+                                    logger.debug(f"⚠️ add_safe_globals not available: {e}")
+                            
                             # Essayer avec local_files_only (nouvelle API)
+                            # Utiliser un context manager pour s'assurer que torch.load utilise weights_only=False
                             try:
-                                self.pipeline = Pipeline.from_pretrained(
-                                    model_path,
-                                    local_files_only=True
-                                )
-                            except TypeError:
-                                # Fallback pour les anciennes versions qui n'ont pas local_files_only
-                                self.pipeline = Pipeline.from_pretrained(model_path)
+                                # Créer un context manager pour patcher torch.load temporairement
+                                import contextlib
+                                
+                                @contextlib.contextmanager
+                                def torch_load_context():
+                                    """Context manager pour forcer weights_only=False"""
+                                    if torch is not None and hasattr(torch, 'load'):
+                                        original_load = torch.load
+                                        def safe_load(*args, **kwargs):
+                                            kwargs['weights_only'] = False
+                                            return original_load(*args, **kwargs)
+                                        torch.load = safe_load
+                                        try:
+                                            yield
+                                        finally:
+                                            torch.load = original_load
+                                    else:
+                                        yield
+                                
+                                with torch_load_context():
+                                    try:
+                                        self.pipeline = Pipeline.from_pretrained(
+                                            model_path,
+                                            local_files_only=True
+                                        )
+                                    except TypeError:
+                                        # Fallback pour les anciennes versions qui n'ont pas local_files_only
+                                        self.pipeline = Pipeline.from_pretrained(model_path)
+                            except Exception as load_error:
+                                # Si le context manager échoue, essayer sans
+                                logger.warning(f"⚠️ Context manager failed, trying direct load: {load_error}")
+                                try:
+                                    self.pipeline = Pipeline.from_pretrained(
+                                        model_path,
+                                        local_files_only=True
+                                    )
+                                except TypeError:
+                                    self.pipeline = Pipeline.from_pretrained(model_path)
                             logger.info("✅ Model loaded from local path (offline mode)")
                         finally:
                             # Restaurer les fonctions originales
@@ -1044,7 +1237,7 @@ class DiarizationService:
                     logger.warning(
                         "⚠️ No local model found and no Hugging Face token provided. "
                         "Diarization will be disabled. "
-                        "Either place a model in /app/models/pyannote-speaker-diarization "
+                        "Either place a model in /app/models/transcribe/pyannote-speaker-diarization "
                         "or set HF_TOKEN environment variable to enable."
                     )
                     self.pipeline = None

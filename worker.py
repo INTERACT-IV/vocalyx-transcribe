@@ -8,6 +8,9 @@ import time
 import os
 import psutil
 import threading
+import json
+import redis
+from pathlib import Path
 from datetime import datetime
 from celery.signals import worker_init
 from celery.worker.control import Panel
@@ -18,6 +21,7 @@ from transcription_service import TranscriptionService  # Compatibilité
 from api_client import VocalyxAPIClient  # Compatibilité
 from infrastructure.api.api_client import VocalyxAPIClient as VocalyxAPIClientRefactored
 from application.services.transcription_worker_service import TranscriptionWorkerService
+from audio_utils import split_audio_intelligent, preprocess_audio, get_audio_duration
 
 config = Config()
 
@@ -37,6 +41,14 @@ else:
 # --- MODIFICATION 2 : Déclarer les services comme 'None' ---
 _api_client = None
 _transcription_service = None
+_redis_client = None
+
+def get_redis_client():
+    """Obtient un client Redis pour stocker les résultats des segments"""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.from_url(config.celery_broker_url.replace('/0', '/1'), decode_responses=True)
+    return _redis_client
 
 # --- PHASE 3 : Cache de modèles Whisper ---
 _model_cache = {}
@@ -216,7 +228,7 @@ def get_worker_health_handler(state, **kwargs):
 
 @celery_app.task(
     bind=True,
-    name='transcribe_audio',
+    name='transcribe_audio',  # Même nom que dans l'API pour compatibilité
     max_retries=3,
     default_retry_delay=60,
     soft_time_limit=1800,
@@ -224,26 +236,91 @@ def get_worker_health_handler(state, **kwargs):
     acks_late=True,
     reject_on_worker_lost=True
 )
-def transcribe_audio_task(self, transcription_id: str):
+def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = None):
     """
     Tâche de transcription exécutée par le worker.
+    
+    Si use_distributed=True ou si l'audio dépasse le seuil, cette tâche va
+    déléguer à orchestrate_distributed_transcription au lieu de traiter directement.
     """
     
-    logger.info(f"[{transcription_id}] 🎯 Task started by worker {config.instance_name}")
+    # Assure que le client API est initialisé
+    api_client = get_api_client()
+    
+    # 1. Récupérer les informations de la transcription depuis l'API
+    logger.info(f"[{transcription_id}] 📡 Fetching transcription data from API...")
+    transcription = api_client.get_transcription(transcription_id)
+    
+    if not transcription:
+        raise ValueError(f"Transcription {transcription_id} not found")
+    
+    file_path = transcription.get('file_path')
+    
+    # Vérifier si on doit utiliser le mode distribué
+    if use_distributed is None:
+        from pathlib import Path
+        try:
+            if file_path:
+                file_path_obj = Path(file_path)
+                if file_path_obj.exists():
+                    import soundfile as sf
+                    duration = sf.info(str(file_path_obj)).duration
+                    # Utiliser le seuil depuis la config (par défaut 30s)
+                    min_duration = 30  # TODO: Récupérer depuis config si possible
+                    use_distributed = duration > min_duration
+                    logger.info(
+                        f"[{transcription_id}] 📊 DISTRIBUTION DECISION (worker) | "
+                        f"Duration: {duration:.1f}s | "
+                        f"Threshold: {min_duration}s | "
+                        f"Mode: {'DISTRIBUTED' if use_distributed else 'CLASSIC'}"
+                    )
+        except Exception as e:
+            logger.warning(f"[{transcription_id}] ⚠️ Could not determine distribution mode: {e}")
+            use_distributed = False
+    
+    # Si mode distribué, déléguer à orchestrate_distributed_transcription
+    if use_distributed and file_path:
+        from pathlib import Path
+        file_path_obj = Path(file_path)
+        if file_path_obj.exists():
+            logger.info(
+                f"[{transcription_id}] 🚀 DISTRIBUTED MODE | "
+                f"Delegating to orchestrate_distributed_transcription | "
+                f"Worker: {config.instance_name}"
+            )
+            from celery import current_app as celery_current_app
+            
+            # Envoyer la tâche d'orchestration
+            orchestrate_task = celery_current_app.send_task(
+                'orchestrate_distributed_transcription',
+                args=[transcription_id, str(file_path)],
+                queue='transcription',
+                countdown=1
+            )
+            
+            logger.info(
+                f"[{transcription_id}] ✅ DISTRIBUTED MODE | "
+                f"Orchestration task enqueued: {orchestrate_task.id}"
+            )
+            
+            return {
+                "transcription_id": transcription_id,
+                "task_id": self.request.id,
+                "orchestration_task_id": orchestrate_task.id,
+                "status": "queued_distributed",
+                "mode": "distributed"
+            }
+    
+    # MODE CLASSIQUE : Traitement direct
+    logger.info(
+        f"[{transcription_id}] 🎯 CLASSIC MODE STARTED | "
+        f"Worker: {config.instance_name} | "
+        f"Task ID: {self.request.id} | "
+        f"Mode: Single worker processing entire audio (non-distributed)"
+    )
     start_time = time.time()
     
     try:
-        # Assure que le client API est initialisé
-        api_client = get_api_client()
-
-        # 1. Récupérer les informations de la transcription depuis l'API
-        logger.info(f"[{transcription_id}] 📡 Fetching transcription data from API...")
-        transcription = api_client.get_transcription(transcription_id)
-        
-        if not transcription:
-            raise ValueError(f"Transcription {transcription_id} not found")
-        
-        file_path = transcription.get('file_path')
         use_vad = transcription.get('vad_enabled', True)
         use_diarization = transcription.get('diarization_enabled', False)
         whisper_model = transcription.get('whisper_model', 'small')  # Récupérer le modèle choisi
@@ -363,6 +440,521 @@ def transcribe_audio_task(self, transcription_id: str):
             "transcription_id": transcription_id,
             "error": str(e)
         }
+
+@celery_app.task(
+    bind=True,
+    name='orchestrate_distributed_transcription',
+    max_retries=2,
+    default_retry_delay=30,
+    acks_late=True
+)
+def orchestrate_distributed_transcription_task(self, transcription_id: str, file_path: str):
+    """
+    Orchestre la transcription distribuée : découpe l'audio et crée les tâches de segments.
+    
+    Args:
+        transcription_id: ID de la transcription
+        file_path: Chemin vers le fichier audio
+    """
+    logger.info(
+        f"[{transcription_id}] 🎼 DISTRIBUTED ORCHESTRATION STARTED | "
+        f"Worker: {config.instance_name} | "
+        f"File: {Path(file_path).name} | "
+        f"Task ID: {self.request.id}"
+    )
+    
+    try:
+        api_client = get_api_client()
+        transcription = api_client.get_transcription(transcription_id)
+        
+        if not transcription:
+            raise ValueError(f"Transcription {transcription_id} not found")
+        
+        file_path_obj = Path(file_path)
+        if not file_path_obj.exists():
+            raise FileNotFoundError(f"Audio file not found: {file_path}")
+        
+        use_vad = transcription.get('vad_enabled', True)
+        whisper_model = transcription.get('whisper_model', 'small')
+        
+        # Mettre à jour le statut
+        api_client.update_transcription(transcription_id, {
+            "status": "processing",
+            "worker_id": f"{config.instance_name}-orchestrator"
+        })
+        
+        # 1. Pré-traiter l'audio
+        logger.info(f"[{transcription_id}] 🔧 DISTRIBUTED ORCHESTRATION | Step 1/4: Preprocessing audio...")
+        preprocessed = preprocess_audio(file_path_obj, preserve_stereo_for_diarization=transcription.get('diarization_enabled', False))
+        processed_path_mono = preprocessed['mono']
+        
+        # 2. Découper en segments (forcer la découpe car on est en mode distribué)
+        logger.info(
+            f"[{transcription_id}] ✂️ DISTRIBUTED ORCHESTRATION | Step 2/4: Splitting audio into segments | "
+            f"VAD: {use_vad} | Segment length: {config.segment_length_ms}ms | "
+            f"Force split: True (distributed mode)"
+        )
+        segment_paths = split_audio_intelligent(
+            processed_path_mono,
+            use_vad=use_vad,
+            segment_length_ms=config.segment_length_ms,
+            force_split_for_distribution=True  # Forcer la découpe en mode distribué
+        )
+        
+        num_segments = len(segment_paths)
+        logger.info(
+            f"[{transcription_id}] ✅ DISTRIBUTED ORCHESTRATION | Step 2/4: Segmentation complete | "
+            f"Segments created: {num_segments} | "
+            f"Will be distributed across available workers"
+        )
+        
+        if num_segments == 0:
+            raise ValueError("No segments created")
+        
+        # 3. Stocker les métadonnées dans Redis
+        redis_client = get_redis_client()
+        segments_key = f"transcription:{transcription_id}:segments"
+        # Timestamp de début pour calculer le temps réel écoulé
+        orchestration_start_time = time.time()
+        
+        segments_metadata = {
+            "transcription_id": transcription_id,
+            "total_segments": num_segments,
+            "completed_segments": 0,
+            "segment_paths": [str(p) for p in segment_paths],
+            "use_vad": use_vad,
+            "use_diarization": transcription.get('diarization_enabled', False),
+            "whisper_model": whisper_model,
+            "processed_path_mono": str(processed_path_mono),
+            "processed_path_stereo": str(preprocessed.get('stereo')) if preprocessed.get('stereo') else None,
+            "is_stereo": preprocessed.get('is_stereo', False),
+            "original_duration": get_audio_duration(file_path_obj),
+            "orchestration_start_time": orchestration_start_time  # Timestamp de début pour calculer le temps réel
+        }
+        redis_client.setex(segments_key, 3600, json.dumps(segments_metadata))  # Expire après 1h
+        
+        # Initialiser le compteur atomique à 0 (pour éviter les race conditions)
+        counter_key = f"transcription:{transcription_id}:completed_count"
+        # Utiliser set au lieu de setex pour s'assurer que c'est bien un entier
+        redis_client.delete(counter_key)  # S'assurer qu'il n'existe pas déjà
+        redis_client.set(counter_key, 0)
+        redis_client.expire(counter_key, 3600)  # Expire après 1h
+        
+        # 4. Créer une tâche pour chaque segment
+        logger.info(
+            f"[{transcription_id}] 📤 DISTRIBUTED ORCHESTRATION | Step 3/4: Creating segment tasks | "
+            f"Total segments: {num_segments} | "
+            f"Queue: transcription | "
+            f"Tasks will be distributed automatically by Celery"
+        )
+        segment_tasks = []
+        from celery import current_app as celery_current_app
+        
+        for i, segment_path in enumerate(segment_paths):
+            # Calculer l'offset temporel (start_time) pour ce segment
+            # On va le calculer approximativement en fonction de l'index
+            # Le worker de segment pourra ajuster avec la durée réelle
+            segment_task = celery_current_app.send_task(
+                'transcribe_segment',
+                args=[transcription_id, str(segment_path), i, num_segments],
+                queue='transcription'
+            )
+            segment_tasks.append(segment_task.id)
+            logger.info(
+                f"[{transcription_id}] 📤 DISTRIBUTED ORCHESTRATION | Segment {i+1}/{num_segments} enqueued | "
+                f"Task ID: {segment_task.id} | "
+                f"File: {Path(segment_path).name} | "
+                f"Waiting for available worker..."
+            )
+        
+        # 5. Stocker les IDs des tâches
+        tasks_key = f"transcription:{transcription_id}:segment_tasks"
+        redis_client.setex(tasks_key, 3600, json.dumps(segment_tasks))
+        
+        logger.info(
+            f"[{transcription_id}] ✅ DISTRIBUTED ORCHESTRATION | Step 3/4: All segment tasks created | "
+            f"Total tasks: {num_segments} | "
+            f"Task IDs: {', '.join(segment_tasks[:5])}{'...' if len(segment_tasks) > 5 else ''} | "
+            f"Next: Workers will process segments in parallel"
+        )
+        
+        return {
+            "status": "orchestrated",
+            "transcription_id": transcription_id,
+            "num_segments": num_segments,
+            "segment_tasks": segment_tasks
+        }
+        
+    except Exception as e:
+        logger.error(f"[{transcription_id}] ❌ Orchestration error: {e}", exc_info=True)
+        try:
+            api_client = get_api_client()
+            api_client.update_transcription(transcription_id, {
+                "status": "error",
+                "error_message": f"Orchestration failed: {str(e)}"
+            })
+        except:
+            pass
+        raise
+
+@celery_app.task(
+    bind=True,
+    name='transcribe_segment',
+    max_retries=2,
+    default_retry_delay=30,
+    acks_late=True,
+    reject_on_worker_lost=True
+)
+def transcribe_segment_task(self, transcription_id: str, segment_path: str, segment_index: int, total_segments: int):
+    """
+    Transcrit un seul segment audio.
+    
+    Args:
+        transcription_id: ID de la transcription parente
+        segment_path: Chemin vers le segment audio
+        segment_index: Index du segment (0-based)
+        total_segments: Nombre total de segments
+    """
+    logger.info(
+        f"[{transcription_id}] 🎯 DISTRIBUTED SEGMENT STARTED | "
+        f"Segment: {segment_index+1}/{total_segments} | "
+        f"Worker: {config.instance_name} | "
+        f"Task ID: {self.request.id} | "
+        f"File: {Path(segment_path).name}"
+    )
+    start_time = time.time()
+    
+    try:
+        # Récupérer les métadonnées depuis Redis
+        redis_client = get_redis_client()
+        segments_key = f"transcription:{transcription_id}:segments"
+        metadata_json = redis_client.get(segments_key)
+        
+        if not metadata_json:
+            raise ValueError(f"Metadata not found for transcription {transcription_id}")
+        
+        metadata = json.loads(metadata_json)
+        use_vad = metadata.get('use_vad', True)
+        whisper_model = metadata.get('whisper_model', 'small')
+        
+        logger.info(
+            f"[{transcription_id}] ⚙️ DISTRIBUTED SEGMENT | Worker {config.instance_name} processing | "
+            f"Segment: {segment_index+1}/{total_segments} | "
+            f"Model: {whisper_model} | VAD: {use_vad}"
+        )
+        
+        # Transcrit le segment
+        transcription_service = get_transcription_service(model_name=whisper_model)
+        segment_path_obj = Path(segment_path)
+        
+        if not segment_path_obj.exists():
+            raise FileNotFoundError(f"Segment not found: {segment_path}")
+        
+        text, segments_list, lang = transcription_service.transcribe_segment(
+            segment_path_obj,
+            use_vad=use_vad
+        )
+        
+        processing_time = round(time.time() - start_time, 2)
+        
+        # Calculer l'offset temporel pour ce segment
+        # On utilise la durée cumulée des segments précédents
+        time_offset = 0.0
+        if segment_index > 0:
+            # Récupérer les résultats des segments précédents pour calculer l'offset
+            for prev_idx in range(segment_index):
+                prev_result_key = f"transcription:{transcription_id}:segment:{prev_idx}:result"
+                prev_result_json = redis_client.get(prev_result_key)
+                if prev_result_json:
+                    prev_result = json.loads(prev_result_json)
+                    if prev_result.get('segments'):
+                        # Prendre le dernier timestamp du segment précédent
+                        last_segment = prev_result['segments'][-1]
+                        time_offset = last_segment.get('end', 0.0)
+        
+        # Ajuster les timestamps avec l'offset
+        adjusted_segments = []
+        for seg in segments_list:
+            adjusted_segments.append({
+                "start": round(seg["start"] + time_offset, 2),
+                "end": round(seg["end"] + time_offset, 2),
+                "text": seg["text"]
+            })
+        
+        # Stocker le résultat dans Redis
+        result = {
+            "segment_index": segment_index,
+            "text": text,
+            "segments": adjusted_segments,
+            "language": lang,
+            "processing_time": processing_time,
+            "time_offset": time_offset
+        }
+        
+        result_key = f"transcription:{transcription_id}:segment:{segment_index}:result"
+        redis_client.setex(result_key, 3600, json.dumps(result))
+        
+        # Incrémenter le compteur de segments complétés de manière atomique (évite les race conditions)
+        counter_key = f"transcription:{transcription_id}:completed_count"
+        completed_count = int(redis_client.incr(counter_key))  # S'assurer que c'est un entier
+        redis_client.expire(counter_key, 3600)  # Expire après 1h
+        
+        # Mettre à jour les métadonnées (sans le compteur, il est géré séparément)
+        metadata['completed_segments'] = completed_count
+        redis_client.setex(segments_key, 3600, json.dumps(metadata))
+        
+        logger.info(
+            f"[{transcription_id}] ✅ DISTRIBUTED SEGMENT COMPLETED | "
+            f"Segment: {segment_index+1}/{total_segments} | "
+            f"Worker: {config.instance_name} | "
+            f"Processing time: {processing_time}s | "
+            f"Progress: {completed_count}/{total_segments} segments done ({100*completed_count/total_segments:.1f}%)"
+        )
+        
+        # Si tous les segments sont terminés, déclencher l'agrégation
+        # Utiliser une opération atomique pour éviter les déclenchements multiples
+        if completed_count >= total_segments:
+            # Utiliser un verrou Redis pour s'assurer qu'un seul worker déclenche l'agrégation
+            lock_key = f"transcription:{transcription_id}:aggregation_lock"
+            lock_acquired = redis_client.set(lock_key, "1", ex=300, nx=True)  # nx=True = set only if not exists
+            
+            if lock_acquired:
+                logger.info(
+                    f"[{transcription_id}] 🎉 DISTRIBUTED MODE | All segments completed | "
+                    f"Total: {total_segments} segments | "
+                    f"All workers finished | "
+                    f"Triggering aggregation... (lock acquired by {config.instance_name})"
+                )
+                from celery import current_app as celery_current_app
+                aggregate_task = celery_current_app.send_task(
+                    'aggregate_segments',
+                    args=[transcription_id],
+                    queue='transcription',
+                    countdown=1
+                )
+                logger.info(
+                    f"[{transcription_id}] ✅ DISTRIBUTED MODE | Aggregation task enqueued | "
+                    f"Task ID: {aggregate_task.id} | "
+                    f"Queue: transcription | "
+                    f"Next: Reassembling all segments"
+                )
+            else:
+                logger.info(
+                    f"[{transcription_id}] ℹ️ DISTRIBUTED MODE | All segments completed but aggregation already triggered by another worker"
+                )
+        
+        return {
+            "status": "success",
+            "segment_index": segment_index,
+            "processing_time": processing_time
+        }
+        
+    except Exception as e:
+        logger.error(f"[{transcription_id}] ❌ Segment {segment_index+1} error: {e}", exc_info=True)
+        raise
+
+@celery_app.task(
+    bind=True,
+    name='aggregate_segments',
+    max_retries=2,
+    default_retry_delay=30,
+    acks_late=True
+)
+def aggregate_segments_task(self, transcription_id: str):
+    """
+    Réassemble les segments transcrits en un résultat final.
+    
+    Args:
+        transcription_id: ID de la transcription
+    """
+    logger.info(
+        f"[{transcription_id}] 🔗 DISTRIBUTED AGGREGATION STARTED | "
+        f"Worker: {config.instance_name} | "
+        f"Task ID: {self.request.id} | "
+        f"Will reassemble all completed segments"
+    )
+    start_time = time.time()
+    
+    try:
+        redis_client = get_redis_client()
+        
+        # Récupérer les métadonnées
+        segments_key = f"transcription:{transcription_id}:segments"
+        metadata_json = redis_client.get(segments_key)
+        
+        if not metadata_json:
+            raise ValueError(f"Metadata not found for transcription {transcription_id}")
+        
+        metadata = json.loads(metadata_json)
+        total_segments = metadata['total_segments']
+        use_diarization = metadata.get('use_diarization', False)
+        
+        # Récupérer tous les résultats des segments
+        logger.info(
+            f"[{transcription_id}] 📥 DISTRIBUTED AGGREGATION | Step 1/3: Collecting segment results | "
+            f"Expected segments: {total_segments}"
+        )
+        all_segments = []
+        full_text = ""
+        language_detected = None
+        max_segment_time = 0.0  # Temps maximum d'un segment (car traitement en parallèle)
+        segment_processing_times = []  # Pour statistiques
+        
+        for i in range(total_segments):
+            result_key = f"transcription:{transcription_id}:segment:{i}:result"
+            result_json = redis_client.get(result_key)
+            
+            if not result_json:
+                raise ValueError(f"Result not found for segment {i} of transcription {transcription_id}")
+            
+            result = json.loads(result_json)
+            all_segments.extend(result['segments'])
+            full_text += result['text'] + " "
+            segment_time = result.get('processing_time', 0.0)
+            segment_processing_times.append(segment_time)
+            max_segment_time = max(max_segment_time, segment_time)  # Temps max car traitement en parallèle
+            
+            if language_detected is None:
+                language_detected = result.get('language')
+        
+        # Calculer le temps réel écoulé depuis le début de l'orchestration
+        orchestration_start_time = metadata.get('orchestration_start_time')
+        if orchestration_start_time:
+            real_elapsed_time = round(time.time() - orchestration_start_time, 2)
+        else:
+            # Fallback : utiliser le temps max des segments + temps d'agrégation
+            real_elapsed_time = max_segment_time
+        
+        logger.info(
+            f"[{transcription_id}] ✅ DISTRIBUTED AGGREGATION | Step 1/3: All results collected | "
+            f"Segments: {len(all_segments)} | "
+            f"Max segment time: {max_segment_time:.1f}s (parallel) | "
+            f"Real elapsed time: {real_elapsed_time:.1f}s"
+        )
+        
+        # Trier les segments par timestamp (au cas où ils arrivent dans le désordre)
+        all_segments.sort(key=lambda x: x['start'])
+        logger.info(
+            f"[{transcription_id}] 🔄 DISTRIBUTED AGGREGATION | Step 2/3: Segments sorted by timestamp | "
+            f"Total segments: {len(all_segments)}"
+        )
+        
+        # Diarisation si demandée
+        if use_diarization:
+            logger.info(f"[{transcription_id}] 🎤 Running speaker diarization on aggregated segments...")
+            try:
+                transcription_service = get_transcription_service(model_name=metadata.get('whisper_model', 'small'))
+                if transcription_service.diarization_service and transcription_service.diarization_service.pipeline:
+                    diarization_audio_path = Path(metadata['processed_path_stereo']) if metadata.get('processed_path_stereo') else Path(metadata['processed_path_mono'])
+                    
+                    if diarization_audio_path.exists():
+                        diarization_segments = transcription_service.diarization_service.diarize(diarization_audio_path)
+                        
+                        if diarization_segments:
+                            all_segments = transcription_service.diarization_service.assign_speakers_to_segments(
+                                all_segments,
+                                diarization_segments
+                            )
+                            logger.info(f"[{transcription_id}] ✅ Diarization completed and assigned to segments")
+            except Exception as e:
+                logger.warning(f"[{transcription_id}] ⚠️ Diarization error: {e}")
+        
+        # Sauvegarder le résultat final
+        api_client = get_api_client()
+        transcription = api_client.get_transcription(transcription_id)
+        enrichment_requested = transcription.get('enrichment_requested', False) if transcription else False
+        
+        status = "transcribed" if enrichment_requested else "done"
+        aggregation_time = round(time.time() - start_time, 2)
+        
+        # Le temps réel de traitement est le temps écoulé depuis le début de l'orchestration
+        # (ou le max des segments + agrégation si pas de timestamp de début)
+        if orchestration_start_time:
+            total_processing_time = round(time.time() - orchestration_start_time, 2)
+        else:
+            # Fallback : max segment + agrégation
+            total_processing_time = round(max_segment_time + aggregation_time, 2)
+        
+        api_client.update_transcription(transcription_id, {
+            "status": status,
+            "text": full_text.strip(),
+            "segments": json.dumps(all_segments),
+            "language": language_detected,
+            "duration": metadata.get('original_duration', 0.0),
+            "processing_time": total_processing_time,
+            "segments_count": len(all_segments)
+        })
+        
+        logger.info(
+            f"[{transcription_id}] ✅ DISTRIBUTED AGGREGATION | Step 3/3: Aggregation completed | "
+            f"Total segments: {len(all_segments)} | "
+            f"Real processing time: {total_processing_time:.1f}s (from orchestration start) | "
+            f"Max segment time: {max_segment_time:.1f}s | "
+            f"Aggregation time: {aggregation_time:.1f}s | "
+            f"Status: {status} | "
+            f"Result saved to database"
+        )
+        
+        # Nettoyer les données Redis
+        try:
+            # Supprimer les clés Redis
+            for i in range(total_segments):
+                redis_client.delete(f"transcription:{transcription_id}:segment:{i}:result")
+            redis_client.delete(segments_key)
+            redis_client.delete(f"transcription:{transcription_id}:segment_tasks")
+            # Nettoyer le compteur atomique et le verrou
+            redis_client.delete(f"transcription:{transcription_id}:completed_count")
+            redis_client.delete(f"transcription:{transcription_id}:aggregation_lock")
+            
+            # Nettoyer les fichiers temporaires
+            from audio_utils import cleanup_segments
+            segment_paths = [Path(p) for p in metadata.get('segment_paths', [])]
+            cleanup_segments(segment_paths)
+            
+            if metadata.get('processed_path_mono'):
+                mono_path = Path(metadata['processed_path_mono'])
+                if mono_path.exists() and mono_path != Path(transcription.get('file_path', '')):
+                    mono_path.unlink()
+            
+            if metadata.get('processed_path_stereo'):
+                stereo_path = Path(metadata['processed_path_stereo'])
+                if stereo_path.exists():
+                    stereo_path.unlink()
+        except Exception as cleanup_error:
+            logger.warning(f"[{transcription_id}] ⚠️ Cleanup error: {cleanup_error}")
+        
+        # Déclencher l'enrichissement si demandé
+        if enrichment_requested:
+            try:
+                from celery import current_app as celery_current_app
+                enrich_task = celery_current_app.send_task(
+                    'enrich_transcription',
+                    args=[transcription_id],
+                    queue='enrichment',
+                    countdown=1
+                )
+                logger.info(f"[{transcription_id}] ✅ Enrichment task enqueued: {enrich_task.id}")
+            except Exception as enrich_error:
+                logger.warning(f"[{transcription_id}] ⚠️ Failed to enqueue enrichment task: {enrich_error}")
+        
+        return {
+            "status": "success",
+            "transcription_id": transcription_id,
+            "segments_count": len(all_segments),
+            "total_processing_time": total_processing_time
+        }
+        
+    except Exception as e:
+        logger.error(f"[{transcription_id}] ❌ Aggregation error: {e}", exc_info=True)
+        try:
+            api_client = get_api_client()
+            api_client.update_transcription(transcription_id, {
+                "status": "error",
+                "error_message": f"Aggregation failed: {str(e)}"
+            })
+        except:
+            pass
+        raise
 
 if __name__ == "__main__":
     # ... (Le reste de votre fichier __main__ est parfait et n'a pas besoin d'être modifié) ...
