@@ -140,56 +140,84 @@ class TranscriptionService:
             # --- MODIFICATION ---
             # Utiliser le verrou pour garantir l'usage exclusif du modèle (transcribe + consommation)
             # Cela évite les conflits entre threads Celery (concurrency=2)
-            with self._model_lock:
-                logger.info(f"🔒 Acquired model lock, starting transcription...")
-                transcribe_start_time = time.time()
-                
-                # Paramètres optimisés pour CPU
-                segments, info = self.model.transcribe(
-                    str(file_path),
-                    language=self.config.language or None,
-                    task="transcribe",
-                    beam_size=self.config.beam_size,  # 1 pour CPU (greedy search)
-                    best_of=getattr(self.config, 'best_of', self.config.beam_size),  # 1 pour CPU
-                    temperature=self.config.temperature,
-                    vad_filter=use_vad,  # VAD intégré de faster-whisper (optimisé)
-                    vad_parameters=vad_params,
-                    word_timestamps=False,  # Désactivé pour CPU (plus rapide)
-                    condition_on_previous_text=False,  # Désactivé pour CPU (plus rapide)
-                )
-                
-                transcribe_time = time.time() - transcribe_start_time
-                logger.info(f"🎯 Whisper inference completed in {transcribe_time:.1f}s, consuming generator...")
-                
-                # Consommer le générateur progressivement
-                start_consume_time = time.time()
-                logger.info(f"🔄 Starting to consume generator (this may take a moment)...")
-                
-                segments_list_raw = []
-                segment_count = 0
-                last_log_time = time.time()
-                max_wait_time = 300  # 5 minutes maximum pour consommer le générateur
-                
-                for seg in segments:
-                    # Vérifier le timeout
-                    elapsed = time.time() - start_consume_time
-                    if elapsed > max_wait_time:
-                        logger.error(f"❌ Timeout: Generator consumption took more than {max_wait_time}s")
-                        raise TimeoutError(f"Generator consumption timeout after {elapsed:.1f}s")
-                    
-                    segments_list_raw.append(seg)
-                    segment_count += 1
-                    
-                    # Logger tous les 10 segments OU toutes les 2 secondes pour suivre la progression
-                    current_time = time.time()
-                    if segment_count % 10 == 0 or (current_time - last_log_time) >= 2.0:
-                        logger.info(f"🔄 Consumed {segment_count} segments so far (elapsed: {elapsed:.1f}s)...")
-                        last_log_time = current_time
-                
-                consume_time = time.time() - start_consume_time
-                total_time = time.time() - transcribe_start_time
-                logger.info(f"✅ Generator consumed, got {len(segments_list_raw)} segments in {consume_time:.1f}s (total: {total_time:.1f}s)")
-                logger.info(f"🔓 Releasing model lock")
+            # Exécuter dans un thread séparé avec timeout global pour éviter les blocages infinis
+            result_container = {'segments_list_raw': None, 'info': None, 'error': None}
+            
+            def transcribe_with_timeout():
+                """Fonction exécutée dans un thread séparé avec timeout global"""
+                try:
+                    with self._model_lock:
+                        logger.info(f"🔒 Acquired model lock, starting transcription...")
+                        transcribe_start_time = time.time()
+                        
+                        # Paramètres optimisés pour CPU
+                        segments, info = self.model.transcribe(
+                            str(file_path),
+                            language=self.config.language or None,
+                            task="transcribe",
+                            beam_size=self.config.beam_size,  # 1 pour CPU (greedy search)
+                            best_of=getattr(self.config, 'best_of', self.config.beam_size),  # 1 pour CPU
+                            temperature=self.config.temperature,
+                            vad_filter=use_vad,  # VAD intégré de faster-whisper (optimisé)
+                            vad_parameters=vad_params,
+                            word_timestamps=False,  # Désactivé pour CPU (plus rapide)
+                            condition_on_previous_text=False,  # Désactivé pour CPU (plus rapide)
+                        )
+                        
+                        transcribe_time = time.time() - transcribe_start_time
+                        logger.info(f"🎯 Whisper inference completed in {transcribe_time:.1f}s, consuming generator...")
+                        
+                        # Consommer le générateur progressivement
+                        start_consume_time = time.time()
+                        logger.info(f"🔄 Starting to consume generator (this may take a moment)...")
+                        
+                        segments_list_raw = []
+                        segment_count = 0
+                        last_log_time = time.time()
+                        
+                        for seg in segments:
+                            segments_list_raw.append(seg)
+                            segment_count += 1
+                            
+                            # Logger tous les 10 segments OU toutes les 2 secondes pour suivre la progression
+                            current_time = time.time()
+                            elapsed = current_time - start_consume_time
+                            if segment_count % 10 == 0 or (current_time - last_log_time) >= 2.0:
+                                logger.info(f"🔄 Consumed {segment_count} segments so far (elapsed: {elapsed:.1f}s)...")
+                                last_log_time = current_time
+                        
+                        consume_time = time.time() - start_consume_time
+                        total_time = time.time() - transcribe_start_time
+                        logger.info(f"✅ Generator consumed, got {len(segments_list_raw)} segments in {consume_time:.1f}s (total: {total_time:.1f}s)")
+                        logger.info(f"🔓 Releasing model lock")
+                        
+                        result_container['segments_list_raw'] = segments_list_raw
+                        result_container['info'] = info
+                except Exception as e:
+                    logger.error(f"❌ Error in transcription thread: {e}", exc_info=True)
+                    result_container['error'] = e
+            
+            # Exécuter dans un thread avec timeout global de 3 minutes
+            logger.info(f"🚀 Starting transcription in separate thread with 3min timeout...")
+            thread = threading.Thread(target=transcribe_with_timeout, daemon=True)
+            thread.start()
+            thread.join(timeout=180)  # 3 minutes timeout global
+            
+            if thread.is_alive():
+                # Le thread est toujours en vie après le timeout = blocage
+                logger.error(f"❌ TIMEOUT: Transcription thread still alive after 180s - forcing error")
+                raise TimeoutError("Transcription timeout after 180s - generator appears to be blocked")
+            
+            # Vérifier les résultats
+            if result_container['error']:
+                raise result_container['error']
+            
+            if result_container['segments_list_raw'] is None:
+                logger.error(f"❌ Transcription thread completed but no segments returned")
+                raise RuntimeError("Transcription completed but no segments were returned")
+            
+            segments_list_raw = result_container['segments_list_raw']
+            info = result_container['info']
             # --- FIN MODIFICATION ---
             
         except Exception as e:
