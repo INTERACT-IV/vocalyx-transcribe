@@ -33,6 +33,7 @@ class TranscriptionService:
         """
         self.config = config
         self.model_name = model_name or config.model
+        self._model_lock = threading.Lock()  # Verrou pour garantir l'usage exclusif du modèle
         
         # ✅ CHARGEMENT COMPLET AU DÉMARRAGE : Charger tous les modèles immédiatement
         logger.info("=" * 80)
@@ -135,44 +136,59 @@ class TranscriptionService:
                     speech_pad_ms=self.config.vad_speech_pad_ms
                 )
             
-            # Paramètres optimisés pour CPU
-            segments, info = self.model.transcribe(
-                str(file_path),
-                language=self.config.language or None,
-                task="transcribe",
-                beam_size=self.config.beam_size,  # 1 pour CPU (greedy search)
-                best_of=getattr(self.config, 'best_of', self.config.beam_size),  # 1 pour CPU
-                temperature=self.config.temperature,
-                vad_filter=use_vad,  # VAD intégré de faster-whisper (optimisé)
-                vad_parameters=vad_params,
-                word_timestamps=False,  # Désactivé pour CPU (plus rapide)
-                condition_on_previous_text=False,  # Désactivé pour CPU (plus rapide)
-            )
-            
-            logger.info(f"🎯 Whisper inference completed, consuming generator...")
-            
             # --- MODIFICATION ---
-            # Remplacer la boucle progressive par une consommation directe.
-            # Le "lazy loading" dans worker.py a corrigé le blocage.
-            start_consume_time = time.time()
-            try:
-                logger.debug(f"🔄 Starting to consume generator (this may take a moment)...")
-                # Consommer le générateur progressivement pour éviter les blocages
+            # Utiliser le verrou pour garantir l'usage exclusif du modèle (transcribe + consommation)
+            # Cela évite les conflits entre threads Celery (concurrency=2)
+            with self._model_lock:
+                logger.info(f"🔒 Acquired model lock, starting transcription...")
+                transcribe_start_time = time.time()
+                
+                # Paramètres optimisés pour CPU
+                segments, info = self.model.transcribe(
+                    str(file_path),
+                    language=self.config.language or None,
+                    task="transcribe",
+                    beam_size=self.config.beam_size,  # 1 pour CPU (greedy search)
+                    best_of=getattr(self.config, 'best_of', self.config.beam_size),  # 1 pour CPU
+                    temperature=self.config.temperature,
+                    vad_filter=use_vad,  # VAD intégré de faster-whisper (optimisé)
+                    vad_parameters=vad_params,
+                    word_timestamps=False,  # Désactivé pour CPU (plus rapide)
+                    condition_on_previous_text=False,  # Désactivé pour CPU (plus rapide)
+                )
+                
+                transcribe_time = time.time() - transcribe_start_time
+                logger.info(f"🎯 Whisper inference completed in {transcribe_time:.1f}s, consuming generator...")
+                
+                # Consommer le générateur progressivement
+                start_consume_time = time.time()
+                logger.info(f"🔄 Starting to consume generator (this may take a moment)...")
+                
                 segments_list_raw = []
                 segment_count = 0
+                last_log_time = time.time()
+                max_wait_time = 300  # 5 minutes maximum pour consommer le générateur
+                
                 for seg in segments:
+                    # Vérifier le timeout
+                    elapsed = time.time() - start_consume_time
+                    if elapsed > max_wait_time:
+                        logger.error(f"❌ Timeout: Generator consumption took more than {max_wait_time}s")
+                        raise TimeoutError(f"Generator consumption timeout after {elapsed:.1f}s")
+                    
                     segments_list_raw.append(seg)
                     segment_count += 1
-                    # Logger tous les 10 segments pour suivre la progression
-                    if segment_count % 10 == 0:
-                        logger.debug(f"🔄 Consumed {segment_count} segments so far...")
+                    
+                    # Logger tous les 10 segments OU toutes les 2 secondes pour suivre la progression
+                    current_time = time.time()
+                    if segment_count % 10 == 0 or (current_time - last_log_time) >= 2.0:
+                        logger.info(f"🔄 Consumed {segment_count} segments so far (elapsed: {elapsed:.1f}s)...")
+                        last_log_time = current_time
                 
                 consume_time = time.time() - start_consume_time
-                logger.info(f"✅ Generator consumed, got {len(segments_list_raw)} segments in {consume_time:.1f}s")
-            except Exception as consume_error:
-                consume_time = time.time() - start_consume_time
-                logger.error(f"❌ Error consuming generator after {consume_time:.1f}s: {consume_error}", exc_info=True)
-                raise
+                total_time = time.time() - transcribe_start_time
+                logger.info(f"✅ Generator consumed, got {len(segments_list_raw)} segments in {consume_time:.1f}s (total: {total_time:.1f}s)")
+                logger.info(f"🔓 Releasing model lock")
             # --- FIN MODIFICATION ---
             
         except Exception as e:
