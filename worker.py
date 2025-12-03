@@ -766,10 +766,17 @@ def aggregate_segments_task(self, transcription_id: str):
             logger.info(f"[{transcription_id}] 🎤 Running speaker diarization on aggregated segments...")
             try:
                 transcription_service = get_transcription_service(model_name=metadata.get('whisper_model', 'small'))
+                
+                # Charger explicitement le service de diarisation si nécessaire
+                if transcription_service.diarization_service is None:
+                    logger.info(f"[{transcription_id}] 🔄 Loading diarization service (lazy loading)...")
+                    transcription_service._load_diarization_service()
+                
                 if transcription_service.diarization_service and transcription_service.diarization_service.pipeline:
                     diarization_audio_path = Path(metadata['processed_path_stereo']) if metadata.get('processed_path_stereo') else Path(metadata['processed_path_mono'])
                     
                     if diarization_audio_path.exists():
+                        logger.info(f"[{transcription_id}] 🎯 Using {'STEREO' if metadata.get('processed_path_stereo') else 'MONO'} audio for diarization")
                         diarization_segments = transcription_service.diarization_service.diarize(diarization_audio_path)
                         
                         if diarization_segments:
@@ -778,8 +785,14 @@ def aggregate_segments_task(self, transcription_id: str):
                                 diarization_segments
                             )
                             logger.info(f"[{transcription_id}] ✅ Diarization completed and assigned to segments")
+                        else:
+                            logger.warning(f"[{transcription_id}] ⚠️ Diarization returned no segments")
+                    else:
+                        logger.warning(f"[{transcription_id}] ⚠️ Diarization audio file not found: {diarization_audio_path}")
+                else:
+                    logger.warning(f"[{transcription_id}] ⚠️ Diarization requested but service not available (check model configuration)")
             except Exception as e:
-                logger.warning(f"[{transcription_id}] ⚠️ Diarization error: {e}")
+                logger.error(f"[{transcription_id}] ❌ Diarization error: {e}", exc_info=True)
         
         # Sauvegarder le résultat final
         api_client = get_api_client()
