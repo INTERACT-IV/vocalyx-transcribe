@@ -5,6 +5,7 @@ Service de transcription avec Whisper (adapté pour worker Celery)
 
 import logging
 import time
+import threading
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
