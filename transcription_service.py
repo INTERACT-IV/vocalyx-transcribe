@@ -155,9 +155,24 @@ class TranscriptionService:
             # Remplacer la boucle progressive par une consommation directe.
             # Le "lazy loading" dans worker.py a corrigé le blocage.
             start_consume_time = time.time()
-            segments_list_raw = list(segments) # Force l'évaluation complète
-            consume_time = time.time() - start_consume_time
-            logger.info(f"✅ Generator consumed, got {len(segments_list_raw)} segments in {consume_time:.1f}s")
+            try:
+                logger.debug(f"🔄 Starting to consume generator (this may take a moment)...")
+                # Consommer le générateur progressivement pour éviter les blocages
+                segments_list_raw = []
+                segment_count = 0
+                for seg in segments:
+                    segments_list_raw.append(seg)
+                    segment_count += 1
+                    # Logger tous les 10 segments pour suivre la progression
+                    if segment_count % 10 == 0:
+                        logger.debug(f"🔄 Consumed {segment_count} segments so far...")
+                
+                consume_time = time.time() - start_consume_time
+                logger.info(f"✅ Generator consumed, got {len(segments_list_raw)} segments in {consume_time:.1f}s")
+            except Exception as consume_error:
+                consume_time = time.time() - start_consume_time
+                logger.error(f"❌ Error consuming generator after {consume_time:.1f}s: {consume_error}", exc_info=True)
+                raise
             # --- FIN MODIFICATION ---
             
         except Exception as e:
