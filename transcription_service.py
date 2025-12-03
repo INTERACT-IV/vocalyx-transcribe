@@ -24,6 +24,7 @@ class TranscriptionService:
     def __init__(self, config, model_name: Optional[str] = None):
         """
         Initialise le service de transcription.
+        Charge TOUS les modèles (Whisper + pyannote) au démarrage pour que le worker soit prêt immédiatement.
         
         Args:
             config: Configuration du worker
@@ -33,21 +34,34 @@ class TranscriptionService:
         self.config = config
         self.model_name = model_name or config.model
         
-        # Charger le modèle Whisper
-        self._load_model()
+        # ✅ CHARGEMENT COMPLET AU DÉMARRAGE : Charger tous les modèles immédiatement
+        logger.info("=" * 80)
+        logger.info("🚀 INITIALISATION DU SERVICE DE TRANSCRIPTION")
+        logger.info("=" * 80)
+        init_start_time = time.time()
         
-        # Charger le service de diarisation (toujours initialiser, même si pas activé globalement)
-        # Cela permet d'utiliser la diarisation à la demande par transcription
-        self.diarization_service = None
-        try:
-            self.diarization_service = DiarizationService(config)
-            if self.diarization_service.pipeline is None:
-                logger.info("ℹ️ Diarization service initialized but model not available (will be skipped if requested)")
-            else:
-                logger.info("✅ Diarization service initialized and ready")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to initialize diarization service: {e} (will be skipped if requested)")
-            self.diarization_service = None
+        # 1. Charger le modèle Whisper
+        logger.info("📦 ÉTAPE 1/2 : Chargement du modèle Whisper...")
+        whisper_start_time = time.time()
+        self._load_model()
+        whisper_load_time = round(time.time() - whisper_start_time, 2)
+        logger.info(f"✅ Modèle Whisper chargé en {whisper_load_time}s")
+        
+        # 2. Charger le service de diarisation (TOUJOURS, même si diarisation désactivée)
+        logger.info("📦 ÉTAPE 2/2 : Chargement du modèle pyannote (diarisation)...")
+        diarization_start_time = time.time()
+        self._load_diarization_service()
+        diarization_load_time = round(time.time() - diarization_start_time, 2)
+        logger.info(f"✅ Modèle pyannote chargé en {diarization_load_time}s")
+        
+        # Résumé de l'initialisation
+        total_init_time = round(time.time() - init_start_time, 2)
+        logger.info("=" * 80)
+        logger.info(f"✅ SERVICE DE TRANSCRIPTION INITIALISÉ ET PRÊT")
+        logger.info(f"   - Modèle Whisper ({self.model_name}): {whisper_load_time}s")
+        logger.info(f"   - Modèle pyannote: {diarization_load_time}s")
+        logger.info(f"   - Temps total d'initialisation: {total_init_time}s")
+        logger.info("=" * 80)
     
     def _load_model(self):
         """Charge le modèle Whisper"""
@@ -83,6 +97,18 @@ class TranscriptionService:
         logger.info(f"✅ Whisper model loaded successfully")
         best_of = getattr(self.config, 'best_of', self.config.beam_size)
         logger.info(f"⚙️ VAD: {self.config.vad_enabled} | Beam size: {self.config.beam_size} | Best of: {best_of}")
+    
+    def _load_diarization_service(self):
+        """Charge le service de diarisation (TOUJOURS, même si diarisation désactivée)"""
+        try:
+            self.diarization_service = DiarizationService(self.config)
+            if self.diarization_service.pipeline is None:
+                logger.info("ℹ️ Diarization service initialized but model not available (will be skipped if requested)")
+            else:
+                logger.info("✅ Diarization service initialized and ready")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to initialize diarization service: {e} (will be skipped if requested)")
+            self.diarization_service = None
         
     def transcribe_segment(self, file_path: Path, use_vad: bool = True, retry_without_vad: bool = True) -> Tuple[str, List[Dict], str]:
         """

@@ -10,6 +10,8 @@ import psutil
 import threading
 import json
 import redis
+import gzip
+import base64
 from pathlib import Path
 from datetime import datetime
 from celery.signals import worker_init
@@ -47,13 +49,57 @@ def get_redis_client():
     """Obtient un client Redis pour stocker les résultats des segments"""
     global _redis_client
     if _redis_client is None:
-        _redis_client = redis.from_url(config.celery_broker_url.replace('/0', '/1'), decode_responses=True)
+        # Utiliser la DB Redis dédiée pour les transcriptions (isolation des données)
+        redis_url = getattr(config, 'redis_transcription_url', None)
+        if not redis_url:
+            # Fallback : utiliser DB 2 de la même instance
+            base_url = config.celery_broker_url.rsplit('/', 1)[0]  # Enlever /0
+            redis_url = f"{base_url}/2"
+        
+        logger.info(f"🔌 Initializing Redis transcription client: {redis_url}")
+        _redis_client = redis.from_url(redis_url, decode_responses=True)
+        
+        # Test de connexion
+        try:
+            _redis_client.ping()
+            logger.info(f"✅ Redis transcription client connected successfully: {redis_url}")
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to Redis transcription: {redis_url} - {e}")
+            raise
+    
     return _redis_client
+
+def _compress_json(data: dict) -> str:
+    """Compresse un dictionnaire JSON pour économiser la mémoire Redis"""
+    if not getattr(config, 'redis_transcription_compress', True):
+        return json.dumps(data)
+    
+    json_str = json.dumps(data)
+    compressed = gzip.compress(json_str.encode('utf-8'), compresslevel=6)
+    # Encoder en base64 pour stockage Redis (string)
+    return base64.b64encode(compressed).decode('utf-8')
+
+def _decompress_json(compressed_str: str) -> dict:
+    """Décompresse une chaîne JSON compressée"""
+    if not getattr(config, 'redis_transcription_compress', True):
+        return json.loads(compressed_str)
+    
+    try:
+        # Décoder depuis base64
+        compressed = base64.b64decode(compressed_str.encode('utf-8'))
+        # Décompresser
+        json_str = gzip.decompress(compressed).decode('utf-8')
+        return json.loads(json_str)
+    except Exception as e:
+        # Si la décompression échoue, essayer de parser comme JSON normal (rétrocompatibilité)
+        logger.warning(f"⚠️ Failed to decompress, trying as plain JSON: {e}")
+        return json.loads(compressed_str)
 
 # --- PHASE 3 : Cache de modèles Whisper ---
 _model_cache = {}
 _model_cache_lock = threading.Lock()
-_MAX_CACHED_MODELS = 2  # Limiter à 2 modèles en cache pour économiser la mémoire
+_MAX_CACHED_MODELS = 10  # Augmenté pour permettre le chargement de tous les modèles (tiny, base, small, medium, large) + pyannote
+_WHISPER_MODELS = ['tiny', 'base', 'small']  # Tous les modèles Whisper à charger
 
 # --- AJOUTS : Variables globales pour psutil ---
 WORKER_PROCESS = None
@@ -61,7 +107,7 @@ WORKER_START_TIME = None
 
 @worker_init.connect
 def on_worker_init(**kwargs):
-    """Initialise psutil quand le worker démarre."""
+    """Initialise psutil et charge TOUS les modèles quand le worker démarre."""
     global WORKER_PROCESS, WORKER_START_TIME
     try:
         WORKER_PROCESS = psutil.Process(os.getpid())
@@ -70,6 +116,59 @@ def on_worker_init(**kwargs):
         logger.info(f"Worker {WORKER_PROCESS.pid} initialisé pour monitoring psutil.")
     except Exception as e:
         logger.error(f"Erreur lors de l'initialisation de psutil: {e}")
+    
+    # ✅ CHARGER TOUS LES MODÈLES AU DÉMARRAGE
+    try:
+        logger.info("=" * 80)
+        logger.info("🚀 DÉMARRAGE DU WORKER - Chargement de TOUS les modèles")
+        logger.info("=" * 80)
+        preload_start_time = time.time()
+        
+        # Charger tous les modèles Whisper disponibles
+        logger.info(f"📦 Chargement de {len(_WHISPER_MODELS)} modèles Whisper: {', '.join(_WHISPER_MODELS)}")
+        logger.info("   Note: Chaque TranscriptionService chargera aussi pyannote (diarisation)")
+        logger.info("   ⚠️  Pyannote sera chargé plusieurs fois (une fois par modèle Whisper)")
+        logger.info("   ⚠️  Cela consomme de la RAM mais garantit que tous les modèles sont prêts")
+        loaded_models = []
+        failed_models = []
+        
+        for model_name in _WHISPER_MODELS:
+            try:
+                # Vérifier si le modèle existe avant de le charger
+                model_path = f"/app/models/transcribe/openai-whisper-{model_name}"
+                if not os.path.exists(model_path):
+                    logger.info(f"   ⏭️  Modèle {model_name} non disponible (chemin non trouvé: {model_path})")
+                    failed_models.append(model_name)
+                    continue
+                
+                logger.info(f"   → Chargement du modèle {model_name}...")
+                model_start_time = time.time()
+                # get_transcription_service() va créer un TranscriptionService qui charge :
+                # - Le modèle Whisper demandé
+                # - Le modèle pyannote (diarisation) - chargé une seule fois et partagé
+                get_transcription_service(model_name=model_name)
+                model_load_time = round(time.time() - model_start_time, 2)
+                logger.info(f"   ✅ Modèle {model_name} chargé en {model_load_time}s")
+                loaded_models.append(model_name)
+            except Exception as e:
+                logger.warning(f"   ⚠️ Échec du chargement du modèle {model_name}: {e}")
+                failed_models.append(model_name)
+                # Continuer avec les autres modèles même si un échoue
+        
+        preload_time = round(time.time() - preload_start_time, 2)
+        logger.info("=" * 80)
+        logger.info(f"✅ PRÉCHARGEMENT TERMINÉ")
+        logger.info(f"   - Modèles Whisper chargés: {len(loaded_models)}/{len(_WHISPER_MODELS)}")
+        if loaded_models:
+            logger.info(f"   - Modèles chargés: {', '.join(loaded_models)}")
+        if failed_models:
+            logger.info(f"   - Modèles non disponibles: {', '.join(failed_models)}")
+        logger.info(f"   - Temps total de préchargement: {preload_time}s")
+        logger.info(f"   - Le worker est maintenant PRÊT à traiter des transcriptions")
+        logger.info("=" * 80)
+    except Exception as e:
+        logger.error(f"❌ Erreur lors du préchargement des modèles: {e}", exc_info=True)
+        # Ne pas bloquer le démarrage du worker si le préchargement échoue
 # --- FIN AJOUTS ---
 
 
@@ -142,12 +241,17 @@ def get_transcription_service(model_name: str = 'small'):
         # Charger le nouveau modèle
         logger.info(f"🚀 Loading Whisper model into cache: {model_name} (cache: {len(_model_cache)}/{_MAX_CACHED_MODELS})")
         try:
+            # Le TranscriptionService charge maintenant TOUS les modèles au démarrage
+            # (Whisper + pyannote) avec des logs détaillés
             service = TranscriptionService(config, model_name=model_name)
             _model_cache[model_name] = {
                 'service': service,
                 'last_used': time.time()
             }
             logger.info(f"✅ Model {model_name} loaded and cached successfully")
+            
+            # Note: Le message "WORKER PRÊT" est maintenant affiché dans @worker_init
+            # après le chargement de tous les modèles
             
             # Si c'est le modèle par défaut (small), mettre à jour aussi _transcription_service pour rétrocompatibilité
             if model_name == 'small':
@@ -531,7 +635,10 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             "original_duration": get_audio_duration(file_path_obj),
             "orchestration_start_time": orchestration_start_time  # Timestamp de début pour calculer le temps réel
         }
-        redis_client.setex(segments_key, 3600, json.dumps(segments_metadata))  # Expire après 1h
+        # Stocker avec compression si activée
+        ttl = getattr(config, 'redis_transcription_ttl', 3600)
+        segments_data = _compress_json(segments_metadata) if getattr(config, 'redis_transcription_compress', True) else json.dumps(segments_metadata)
+        redis_client.setex(segments_key, ttl, segments_data)
         
         # Initialiser le compteur atomique à 0 (pour éviter les race conditions)
         counter_key = f"transcription:{transcription_id}:completed_count"
@@ -633,7 +740,12 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         if not metadata_json:
             raise ValueError(f"Metadata not found for transcription {transcription_id}")
         
-        metadata = json.loads(metadata_json)
+        # Décompresser si nécessaire
+        try:
+            metadata = _decompress_json(metadata_json)
+        except:
+            # Fallback : essayer comme JSON normal (rétrocompatibilité)
+            metadata = json.loads(metadata_json)
         use_vad = metadata.get('use_vad', True)
         whisper_model = metadata.get('whisper_model', 'small')
         
@@ -692,7 +804,10 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         }
         
         result_key = f"transcription:{transcription_id}:segment:{segment_index}:result"
-        redis_client.setex(result_key, 3600, json.dumps(result))
+        # Stocker avec compression si activée
+        ttl = getattr(config, 'redis_transcription_ttl', 3600)
+        result_data = _compress_json(result) if getattr(config, 'redis_transcription_compress', True) else json.dumps(result)
+        redis_client.setex(result_key, ttl, result_data)
         
         # Incrémenter le compteur de segments complétés de manière atomique (évite les race conditions)
         counter_key = f"transcription:{transcription_id}:completed_count"
@@ -701,7 +816,9 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
         # Mettre à jour les métadonnées (sans le compteur, il est géré séparément)
         metadata['completed_segments'] = completed_count
-        redis_client.setex(segments_key, 3600, json.dumps(metadata))
+        ttl = getattr(config, 'redis_transcription_ttl', 3600)
+        metadata_data = _compress_json(metadata) if getattr(config, 'redis_transcription_compress', True) else json.dumps(metadata)
+        redis_client.setex(segments_key, ttl, metadata_data)
         
         logger.info(
             f"[{transcription_id}] ✅ DISTRIBUTED SEGMENT COMPLETED | "
@@ -785,7 +902,12 @@ def aggregate_segments_task(self, transcription_id: str):
         if not metadata_json:
             raise ValueError(f"Metadata not found for transcription {transcription_id}")
         
-        metadata = json.loads(metadata_json)
+        # Décompresser si nécessaire
+        try:
+            metadata = _decompress_json(metadata_json)
+        except:
+            # Fallback : essayer comme JSON normal (rétrocompatibilité)
+            metadata = json.loads(metadata_json)
         total_segments = metadata['total_segments']
         use_diarization = metadata.get('use_diarization', False)
         
@@ -807,7 +929,12 @@ def aggregate_segments_task(self, transcription_id: str):
             if not result_json:
                 raise ValueError(f"Result not found for segment {i} of transcription {transcription_id}")
             
-            result = json.loads(result_json)
+            # Décompresser si nécessaire
+            try:
+                result = _decompress_json(result_json)
+            except:
+                # Fallback : essayer comme JSON normal (rétrocompatibilité)
+                result = json.loads(result_json)
             all_segments.extend(result['segments'])
             full_text += result['text'] + " "
             segment_time = result.get('processing_time', 0.0)
@@ -895,16 +1022,18 @@ def aggregate_segments_task(self, transcription_id: str):
             f"Result saved to database"
         )
         
-        # Nettoyer les données Redis
+        # Nettoyer les données Redis (utiliser pipeline pour performance)
         try:
-            # Supprimer les clés Redis
+            # Utiliser un pipeline Redis pour supprimer toutes les clés en une seule opération
+            pipe = redis_client.pipeline()
             for i in range(total_segments):
-                redis_client.delete(f"transcription:{transcription_id}:segment:{i}:result")
-            redis_client.delete(segments_key)
-            redis_client.delete(f"transcription:{transcription_id}:segment_tasks")
-            # Nettoyer le compteur atomique et le verrou
-            redis_client.delete(f"transcription:{transcription_id}:completed_count")
-            redis_client.delete(f"transcription:{transcription_id}:aggregation_lock")
+                pipe.delete(f"transcription:{transcription_id}:segment:{i}:result")
+            pipe.delete(segments_key)
+            pipe.delete(f"transcription:{transcription_id}:segment_tasks")
+            pipe.delete(f"transcription:{transcription_id}:completed_count")
+            pipe.delete(f"transcription:{transcription_id}:aggregation_lock")
+            pipe.execute()  # Exécuter toutes les suppressions en une seule fois
+            logger.debug(f"[{transcription_id}] 🧹 Redis cleanup completed (pipeline)")
             
             # Nettoyer les fichiers temporaires
             from audio_utils import cleanup_segments

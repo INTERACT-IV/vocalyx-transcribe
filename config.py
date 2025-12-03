@@ -47,6 +47,15 @@ class Config:
             'result_backend': 'redis://localhost:6379/0'
         }
         
+        config['REDIS_TRANSCRIPTION'] = {
+            # DB Redis dédiée pour les opérations de transcription (isolation des données)
+            'url': 'redis://localhost:6379/2',
+            # Compression des données JSON (réduit la mémoire et le réseau)
+            'compress_data': 'true',
+            # TTL par défaut pour les segments (en secondes)
+            'default_ttl': '3600'
+        }
+        
         config['WHISPER'] = {
             'model': './models/transcribe/openai-whisper-small',
             'device': 'cpu',
@@ -124,6 +133,34 @@ class Config:
         self.celery_result_backend = os.environ.get(
             'CELERY_RESULT_BACKEND', 
             self.config.get('CELERY', 'result_backend')
+        )
+        
+        # REDIS TRANSCRIPTION (DB dédiée pour les segments)
+        # Utilise DB 2 par défaut pour isoler des opérations Celery (DB 0) et autres (DB 1)
+        # PRIORITÉ: Variable d'environnement > config.ini > fallback depuis CELERY_BROKER_URL
+        redis_transcription_url = os.environ.get('REDIS_TRANSCRIPTION_URL', None)
+        
+        if not redis_transcription_url:
+            # Essayer depuis config.ini seulement si la section existe
+            try:
+                redis_transcription_url = self.config.get('REDIS_TRANSCRIPTION', 'url')
+            except (configparser.NoSectionError, configparser.NoOptionError):
+                redis_transcription_url = None
+        
+        if redis_transcription_url:
+            self.redis_transcription_url = redis_transcription_url
+            logger.info(f"✅ Redis transcription URL: {redis_transcription_url}")
+        else:
+            # Fallback : utiliser DB 2 de la même instance Redis (depuis CELERY_BROKER_URL)
+            base_redis_url = self.celery_broker_url.rsplit('/', 1)[0]  # Enlever /0
+            self.redis_transcription_url = f"{base_redis_url}/2"
+            logger.info(f"✅ Redis transcription URL (fallback): {self.redis_transcription_url}")
+        
+        self.redis_transcription_compress = self.config.getboolean(
+            'REDIS_TRANSCRIPTION', 'compress_data', fallback=True
+        )
+        self.redis_transcription_ttl = self.config.getint(
+            'REDIS_TRANSCRIPTION', 'default_ttl', fallback=3600
         )
         
         # WHISPER
