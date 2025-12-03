@@ -724,11 +724,23 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
                 prev_result_key = f"transcription:{transcription_id}:segment:{prev_idx}:result"
                 prev_result_json = redis_client.get(prev_result_key)
                 if prev_result_json:
-                    prev_result = json.loads(prev_result_json)
-                    if prev_result.get('segments'):
-                        # Prendre le dernier timestamp du segment précédent
-                        last_segment = prev_result['segments'][-1]
-                        time_offset = last_segment.get('end', 0.0)
+                    try:
+                        # Décompresser si nécessaire (comme pour les métadonnées)
+                        try:
+                            prev_result = _decompress_json(prev_result_json)
+                        except:
+                            # Fallback : essayer comme JSON normal (rétrocompatibilité)
+                            prev_result = json.loads(prev_result_json)
+                        
+                        if prev_result.get('segments'):
+                            # Prendre le dernier timestamp du segment précédent
+                            last_segment = prev_result['segments'][-1]
+                            time_offset = last_segment.get('end', 0.0)
+                            break  # On prend le dernier segment disponible
+                    except (json.JSONDecodeError, KeyError, IndexError) as e:
+                        # Si le segment précédent n'est pas encore disponible ou invalide, ignorer
+                        logger.debug(f"[{transcription_id}] Segment {prev_idx} not yet available or invalid, skipping offset calculation: {e}")
+                        continue
         
         # Ajuster les timestamps avec l'offset
         adjusted_segments = []
