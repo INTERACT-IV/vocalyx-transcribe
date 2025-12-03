@@ -19,6 +19,7 @@ from config import Config
 from infrastructure.api.api_client import VocalyxAPIClient
 from infrastructure.redis.redis_manager import RedisCompressionManager, RedisTranscriptionManager
 from infrastructure.models.model_cache import ModelCache
+from application.services.diarization_merger import DiarizationMerger
 from audio_utils import split_audio_intelligent, preprocess_audio, get_audio_duration
 
 config = Config()
@@ -464,7 +465,33 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         if num_segments == 0:
             raise ValueError("No segments created")
         
-        # 3. Stocker les métadonnées dans Redis
+        # 3. Préparer la diarisation distribuée si demandée
+        use_diarization = transcription.get('diarization_enabled', False)
+        diarization_segment_paths = []
+        diarization_time_offsets = []
+        
+        if use_diarization:
+            diarization_audio_path = preprocessed.get('stereo') if preprocessed.get('stereo') else processed_path_mono
+            if diarization_audio_path and Path(diarization_audio_path).exists():
+                logger.info(f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION | Preparing diarization segments...")
+                # Réutiliser les segments existants pour la diarisation
+                diarization_segment_paths = segment_paths
+                # Calculer les offsets temporels pour chaque segment
+                current_offset = 0.0
+                for i, seg_path in enumerate(segment_paths):
+                    diarization_time_offsets.append(current_offset)
+                    # Estimer la durée du segment
+                    try:
+                        import soundfile as sf
+                        seg_duration = sf.info(str(seg_path)).duration
+                        current_offset += seg_duration
+                    except:
+                        # Fallback : utiliser la durée moyenne estimée
+                        estimated_duration = get_audio_duration(file_path_obj) / num_segments
+                        current_offset += estimated_duration
+                logger.info(f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION | Prepared {len(diarization_segment_paths)} segments for diarization")
+        
+        # 4. Stocker les métadonnées dans Redis
         redis_manager = get_redis_manager()
         orchestration_start_time = time.time()
         
@@ -474,22 +501,32 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             "completed_segments": 0,
             "segment_paths": [str(p) for p in segment_paths],
             "use_vad": use_vad,
-            "use_diarization": transcription.get('diarization_enabled', False),
+            "use_diarization": use_diarization,
             "whisper_model": whisper_model,
             "processed_path_mono": str(processed_path_mono),
             "processed_path_stereo": str(preprocessed.get('stereo')) if preprocessed.get('stereo') else None,
             "is_stereo": preprocessed.get('is_stereo', False),
             "original_duration": get_audio_duration(file_path_obj),
-            "orchestration_start_time": orchestration_start_time
+            "orchestration_start_time": orchestration_start_time,
+            "diarization_segment_paths": [str(p) for p in diarization_segment_paths],
+            "diarization_time_offsets": diarization_time_offsets
         }
         
         ttl = getattr(config, 'redis_transcription_ttl', 3600)
         redis_manager.store_metadata(transcription_id, segments_metadata, ttl)
         redis_manager.reset_completed_count(transcription_id)
         
-        # 4. Créer une tâche pour chaque segment
+        # Réinitialiser aussi le compteur de diarisation si nécessaire
+        if use_diarization:
+            redis_client = get_redis_client()
+            diarization_counter_key = f"transcription:{transcription_id}:diarization_completed_count"
+            redis_client.delete(diarization_counter_key)
+            redis_client.set(diarization_counter_key, 0)
+            redis_client.expire(diarization_counter_key, 3600)
+        
+        # 5. Créer une tâche pour chaque segment de transcription
         logger.info(
-            f"[{transcription_id}] 📤 DISTRIBUTED ORCHESTRATION | Step 3/4: Creating segment tasks | "
+            f"[{transcription_id}] 📤 DISTRIBUTED ORCHESTRATION | Step 3/5: Creating transcription segment tasks | "
             f"Total segments: {num_segments} | "
             f"Queue: transcription | "
             f"Tasks will be distributed automatically by Celery"
@@ -511,15 +548,42 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
                 f"Waiting for available worker..."
             )
         
-        # 5. Stocker les IDs des tâches
+        # 6. Créer des tâches de diarisation distribuée si demandée
+        diarization_tasks = []
+        if use_diarization and diarization_segment_paths:
+            logger.info(
+                f"[{transcription_id}] 🎤 DISTRIBUTED ORCHESTRATION | Step 4/5: Creating diarization segment tasks | "
+                f"Total segments: {len(diarization_segment_paths)} | "
+                f"Queue: transcription | "
+                f"Tasks will be distributed automatically by Celery"
+            )
+            
+            for i, diarization_seg_path in enumerate(diarization_segment_paths):
+                diarization_task = celery_current_app.send_task(
+                    'diarize_segment',
+                    args=[transcription_id, str(diarization_seg_path), i, len(diarization_segment_paths)],
+                    queue='transcription'
+                )
+                diarization_tasks.append(diarization_task.id)
+                logger.info(
+                    f"[{transcription_id}] 🎤 DISTRIBUTED ORCHESTRATION | Diarization segment {i+1}/{len(diarization_segment_paths)} enqueued | "
+                    f"Task ID: {diarization_task.id} | "
+                    f"File: {Path(diarization_seg_path).name}"
+                )
+        
+        # 7. Stocker les IDs des tâches
         redis_client = get_redis_client()
         tasks_key = f"transcription:{transcription_id}:segment_tasks"
         redis_client.setex(tasks_key, 3600, json.dumps(segment_tasks))
         
+        if diarization_tasks:
+            diarization_tasks_key = f"transcription:{transcription_id}:diarization_tasks"
+            redis_client.setex(diarization_tasks_key, 3600, json.dumps(diarization_tasks))
+        
         logger.info(
-            f"[{transcription_id}] ✅ DISTRIBUTED ORCHESTRATION | Step 3/4: All segment tasks created | "
-            f"Total tasks: {num_segments} | "
-            f"Task IDs: {', '.join(segment_tasks[:5])}{'...' if len(segment_tasks) > 5 else ''} | "
+            f"[{transcription_id}] ✅ DISTRIBUTED ORCHESTRATION | Step 5/5: All tasks created | "
+            f"Transcription tasks: {num_segments} | "
+            f"Diarization tasks: {len(diarization_tasks) if use_diarization else 0} | "
             f"Next: Workers will process segments in parallel"
         )
         
@@ -645,12 +709,30 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
             f"Progress: {completed_count}/{total_segments} segments done ({100*completed_count/total_segments:.1f}%)"
         )
         
-        # Si tous les segments sont terminés, déclencher l'agrégation
+        # Si tous les segments sont terminés, vérifier aussi la diarisation avant d'agréger
         if completed_count >= total_segments:
-            if redis_manager.acquire_aggregation_lock(transcription_id):
+            # Vérifier si la diarisation est aussi terminée (si demandée)
+            use_diarization = metadata.get('use_diarization', False)
+            diarization_ready = True
+            
+            if use_diarization:
+                diarization_segment_paths = metadata.get('diarization_segment_paths', [])
+                if diarization_segment_paths:
+                    redis_client = get_redis_client()
+                    diarization_counter_key = f"transcription:{transcription_id}:diarization_completed_count"
+                    diarization_completed = int(redis_client.get(diarization_counter_key) or 0)
+                    diarization_ready = diarization_completed >= len(diarization_segment_paths)
+                    
+                    if not diarization_ready:
+                        logger.info(
+                            f"[{transcription_id}] ⏳ Waiting for diarization: {diarization_completed}/{len(diarization_segment_paths)} segments done"
+                        )
+            
+            if diarization_ready and redis_manager.acquire_aggregation_lock(transcription_id):
                 logger.info(
                     f"[{transcription_id}] 🎉 DISTRIBUTED MODE | All segments completed | "
                     f"Total: {total_segments} segments | "
+                    f"Diarization: {'ready' if use_diarization else 'N/A'} | "
                     f"All workers finished | "
                     f"Triggering aggregation... (lock acquired by {config.instance_name})"
                 )
@@ -667,6 +749,10 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
                     f"Queue: transcription | "
                     f"Next: Reassembling all segments"
                 )
+            elif not diarization_ready:
+                logger.info(
+                    f"[{transcription_id}] ℹ️ DISTRIBUTED MODE | Transcription complete but waiting for diarization"
+                )
             else:
                 logger.info(
                     f"[{transcription_id}] ℹ️ DISTRIBUTED MODE | All segments completed but aggregation already triggered by another worker"
@@ -680,6 +766,125 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
     except Exception as e:
         logger.error(f"[{transcription_id}] ❌ Segment {segment_index+1} error: {e}", exc_info=True)
+        raise
+
+@celery_app.task(
+    bind=True,
+    name='diarize_segment',
+    max_retries=2,
+    default_retry_delay=30,
+    acks_late=True,
+    reject_on_worker_lost=True
+)
+def diarize_segment_task(self, transcription_id: str, segment_path: str, segment_index: int, total_segments: int):
+    """
+    Diarise un seul segment audio.
+    
+    Args:
+        transcription_id: ID de la transcription parente
+        segment_path: Chemin vers le segment audio
+        segment_index: Index du segment (0-based)
+        total_segments: Nombre total de segments
+    """
+    logger.info(
+        f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION SEGMENT STARTED | "
+        f"Segment: {segment_index+1}/{total_segments} | "
+        f"Worker: {config.instance_name} | "
+        f"Task ID: {self.request.id} | "
+        f"File: {Path(segment_path).name}"
+    )
+    start_time = time.time()
+    
+    try:
+        # Récupérer les métadonnées depuis Redis
+        redis_manager = get_redis_manager()
+        metadata = redis_manager.get_metadata(transcription_id)
+        
+        if not metadata:
+            raise ValueError(f"Metadata not found for transcription {transcription_id}")
+        
+        whisper_model = metadata.get('whisper_model', 'small')
+        
+        # Obtenir le service de transcription et charger la diarisation
+        transcription_service = get_transcription_service(model_name=whisper_model)
+        
+        if transcription_service.diarization_service is None:
+            logger.info(f"[{transcription_id}] 🔄 Loading diarization service (lazy loading)...")
+            transcription_service._load_diarization_service()
+        
+        if not transcription_service.diarization_service or not transcription_service.diarization_service.pipeline:
+            raise ValueError("Diarization service not available")
+        
+        segment_path_obj = Path(segment_path)
+        if not segment_path_obj.exists():
+            raise FileNotFoundError(f"Segment not found: {segment_path}")
+        
+        # Diariser le segment
+        diarization_segments = transcription_service.diarization_service.diarize(segment_path_obj)
+        
+        processing_time = round(time.time() - start_time, 2)
+        
+        # Récupérer l'offset temporel depuis les métadonnées
+        diarization_time_offsets = metadata.get('diarization_time_offsets', [])
+        time_offset = diarization_time_offsets[segment_index] if segment_index < len(diarization_time_offsets) else 0.0
+        
+        # Stocker le résultat dans Redis
+        result = {
+            "segment_index": segment_index,
+            "segments": diarization_segments,
+            "processing_time": processing_time,
+            "time_offset": time_offset
+        }
+        
+        ttl = getattr(config, 'redis_transcription_ttl', 3600)
+        redis_manager.store_diarization_result(transcription_id, segment_index, result, ttl)
+        completed_count = redis_manager.increment_diarization_count(transcription_id)
+        
+        logger.info(
+            f"[{transcription_id}] ✅ DISTRIBUTED DIARIZATION SEGMENT COMPLETED | "
+            f"Segment: {segment_index+1}/{total_segments} | "
+            f"Worker: {config.instance_name} | "
+            f"Processing time: {processing_time}s | "
+            f"Segments: {len(diarization_segments)} | "
+            f"Progress: {completed_count}/{total_segments} segments done ({100*completed_count/total_segments:.1f}%)"
+        )
+        
+        # Si tous les segments de diarisation sont terminés, vérifier si on peut déclencher l'agrégation
+        if completed_count >= total_segments:
+            # Vérifier si la transcription est aussi terminée
+            redis_client = get_redis_client()
+            transcription_counter_key = f"transcription:{transcription_id}:completed_count"
+            transcription_completed = int(redis_client.get(transcription_counter_key) or 0)
+            total_transcription_segments = metadata.get('total_segments', 0)
+            
+            if transcription_completed >= total_transcription_segments:
+                # Les deux sont terminés, déclencher l'agrégation
+                if redis_manager.acquire_aggregation_lock(transcription_id):
+                    logger.info(
+                        f"[{transcription_id}] 🎉 DISTRIBUTED MODE | All transcription and diarization segments completed | "
+                        f"Triggering aggregation... (lock acquired by {config.instance_name})"
+                    )
+                    from celery import current_app as celery_current_app
+                    aggregate_task = celery_current_app.send_task(
+                        'aggregate_segments',
+                        args=[transcription_id],
+                        queue='transcription',
+                        countdown=1
+                    )
+                    logger.info(
+                        f"[{transcription_id}] ✅ DISTRIBUTED MODE | Aggregation task enqueued | "
+                        f"Task ID: {aggregate_task.id}"
+                    )
+        
+        return {
+            "status": "success",
+            "segment_index": segment_index,
+            "processing_time": processing_time,
+            "segments_count": len(diarization_segments)
+        }
+        
+    except Exception as e:
+        logger.error(f"[{transcription_id}] ❌ Diarization segment {segment_index+1} error: {e}", exc_info=True)
         raise
 
 @celery_app.task(
@@ -761,36 +966,74 @@ def aggregate_segments_task(self, transcription_id: str):
             f"Total segments: {len(all_segments)}"
         )
         
-        # Diarisation si demandée
+        # Diarisation si demandée (distribuée ou non)
         if use_diarization:
             logger.info(f"[{transcription_id}] 🎤 Running speaker diarization on aggregated segments...")
             try:
-                transcription_service = get_transcription_service(model_name=metadata.get('whisper_model', 'small'))
+                # Vérifier si la diarisation distribuée a été utilisée
+                diarization_segment_paths = metadata.get('diarization_segment_paths', [])
+                diarization_time_offsets = metadata.get('diarization_time_offsets', [])
                 
-                # Charger explicitement le service de diarisation si nécessaire
-                if transcription_service.diarization_service is None:
-                    logger.info(f"[{transcription_id}] 🔄 Loading diarization service (lazy loading)...")
-                    transcription_service._load_diarization_service()
-                
-                if transcription_service.diarization_service and transcription_service.diarization_service.pipeline:
-                    diarization_audio_path = Path(metadata['processed_path_stereo']) if metadata.get('processed_path_stereo') else Path(metadata['processed_path_mono'])
+                if diarization_segment_paths and len(diarization_segment_paths) > 0:
+                    # Mode distribué : récupérer les résultats de diarisation depuis Redis
+                    logger.info(f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION | Collecting diarization results from {len(diarization_segment_paths)} segments...")
                     
-                    if diarization_audio_path.exists():
-                        logger.info(f"[{transcription_id}] 🎯 Using {'STEREO' if metadata.get('processed_path_stereo') else 'MONO'} audio for diarization")
-                        diarization_segments = transcription_service.diarization_service.diarize(diarization_audio_path)
+                    diarization_results = []
+                    for i in range(len(diarization_segment_paths)):
+                        diarization_result = redis_manager.get_diarization_result(transcription_id, i)
+                        if diarization_result:
+                            diarization_results.append(diarization_result.get('segments', []))
+                        else:
+                            logger.warning(f"[{transcription_id}] ⚠️ Diarization result not found for segment {i}")
+                            diarization_results.append([])
+                    
+                    # Fusionner les résultats de diarisation
+                    if any(diarization_results):
+                        merger = DiarizationMerger()
+                        merged_diarization_segments = merger.merge_diarization_segments(
+                            diarization_results,
+                            diarization_time_offsets
+                        )
                         
-                        if diarization_segments:
+                        if merged_diarization_segments:
+                            transcription_service = get_transcription_service(model_name=metadata.get('whisper_model', 'small'))
                             all_segments = transcription_service.diarization_service.assign_speakers_to_segments(
                                 all_segments,
-                                diarization_segments
+                                merged_diarization_segments
                             )
-                            logger.info(f"[{transcription_id}] ✅ Diarization completed and assigned to segments")
+                            logger.info(f"[{transcription_id}] ✅ DISTRIBUTED DIARIZATION | Completed and assigned to segments")
                         else:
-                            logger.warning(f"[{transcription_id}] ⚠️ Diarization returned no segments")
+                            logger.warning(f"[{transcription_id}] ⚠️ No diarization segments after merging")
                     else:
-                        logger.warning(f"[{transcription_id}] ⚠️ Diarization audio file not found: {diarization_audio_path}")
+                        logger.warning(f"[{transcription_id}] ⚠️ No diarization results found")
                 else:
-                    logger.warning(f"[{transcription_id}] ⚠️ Diarization requested but service not available (check model configuration)")
+                    # Mode non distribué : diarisation sur l'audio complet (fallback)
+                    logger.info(f"[{transcription_id}] 🎤 Using non-distributed diarization (fallback)...")
+                    transcription_service = get_transcription_service(model_name=metadata.get('whisper_model', 'small'))
+                    
+                    if transcription_service.diarization_service is None:
+                        logger.info(f"[{transcription_id}] 🔄 Loading diarization service (lazy loading)...")
+                        transcription_service._load_diarization_service()
+                    
+                    if transcription_service.diarization_service and transcription_service.diarization_service.pipeline:
+                        diarization_audio_path = Path(metadata['processed_path_stereo']) if metadata.get('processed_path_stereo') else Path(metadata['processed_path_mono'])
+                        
+                        if diarization_audio_path.exists():
+                            logger.info(f"[{transcription_id}] 🎯 Using {'STEREO' if metadata.get('processed_path_stereo') else 'MONO'} audio for diarization")
+                            diarization_segments = transcription_service.diarization_service.diarize(diarization_audio_path)
+                            
+                            if diarization_segments:
+                                all_segments = transcription_service.diarization_service.assign_speakers_to_segments(
+                                    all_segments,
+                                    diarization_segments
+                                )
+                                logger.info(f"[{transcription_id}] ✅ Diarization completed and assigned to segments")
+                            else:
+                                logger.warning(f"[{transcription_id}] ⚠️ Diarization returned no segments")
+                        else:
+                            logger.warning(f"[{transcription_id}] ⚠️ Diarization audio file not found: {diarization_audio_path}")
+                    else:
+                        logger.warning(f"[{transcription_id}] ⚠️ Diarization requested but service not available (check model configuration)")
             except Exception as e:
                 logger.error(f"[{transcription_id}] ❌ Diarization error: {e}", exc_info=True)
         
@@ -830,9 +1073,21 @@ def aggregate_segments_task(self, transcription_id: str):
             f"Result saved to database"
         )
         
-        # Nettoyer les données Redis
+        # Nettoyer les données Redis (transcription + diarisation)
         try:
             redis_manager.cleanup(transcription_id, total_segments)
+            
+            # Nettoyer aussi les résultats de diarisation distribuée
+            if use_diarization:
+                diarization_segment_paths = metadata.get('diarization_segment_paths', [])
+                if diarization_segment_paths:
+                    redis_client = get_redis_client()
+                    pipe = redis_client.pipeline()
+                    for i in range(len(diarization_segment_paths)):
+                        pipe.delete(f"transcription:{transcription_id}:diarization:{i}:result")
+                    pipe.delete(f"transcription:{transcription_id}:diarization_tasks")
+                    pipe.delete(f"transcription:{transcription_id}:diarization_completed_count")
+                    pipe.execute()
             
             # Nettoyer les fichiers temporaires
             from audio_utils import cleanup_segments

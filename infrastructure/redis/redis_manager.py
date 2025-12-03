@@ -103,6 +103,31 @@ class RedisTranscriptionManager:
         key = f"transcription:{transcription_id}:aggregation_lock"
         return bool(self.client.set(key, "1", ex=timeout, nx=True))
     
+    def store_diarization_result(self, transcription_id: str, segment_index: int, result: dict, ttl: int = 3600):
+        """Stocke le résultat de diarisation d'un segment"""
+        key = f"transcription:{transcription_id}:diarization:{segment_index}:result"
+        data = self.compression.compress(result) if self.compression.enabled else json.dumps(result)
+        self.client.setex(key, ttl, data)
+    
+    def get_diarization_result(self, transcription_id: str, segment_index: int) -> Optional[dict]:
+        """Récupère le résultat de diarisation d'un segment"""
+        key = f"transcription:{transcription_id}:diarization:{segment_index}:result"
+        data = self.client.get(key)
+        if not data:
+            return None
+        
+        try:
+            return self.compression.decompress(data)
+        except:
+            return json.loads(data)
+    
+    def increment_diarization_count(self, transcription_id: str) -> int:
+        """Incrémente atomiquement le compteur de segments de diarisation complétés"""
+        key = f"transcription:{transcription_id}:diarization_completed_count"
+        count = int(self.client.incr(key))
+        self.client.expire(key, 3600)
+        return count
+    
     def cleanup(self, transcription_id: str, total_segments: int):
         """Nettoie toutes les clés Redis associées à une transcription"""
         pipe = self.client.pipeline()
