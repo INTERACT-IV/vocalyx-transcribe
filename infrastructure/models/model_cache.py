@@ -14,7 +14,7 @@ logger = logging.getLogger("vocalyx")
 class ModelCache:
     """Cache LRU pour les modèles Whisper"""
     
-    def __init__(self, max_models: int = 2):
+    def __init__(self, max_models: int = 10):
         self.max_models = max_models
         self._cache: Dict[str, Dict] = {}
         self._lock = threading.Lock()

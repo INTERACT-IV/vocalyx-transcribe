@@ -116,7 +116,7 @@ def get_transcription_service(model_name: str = 'small'):
     """
     global _model_cache
     if _model_cache is None:
-        _model_cache = ModelCache(max_models=2)
+        _model_cache = ModelCache(max_models=10)
     
     return _model_cache.get(model_name, config)
 
