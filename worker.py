@@ -98,8 +98,7 @@ def _decompress_json(compressed_str: str) -> dict:
 # --- PHASE 3 : Cache de modèles Whisper ---
 _model_cache = {}
 _model_cache_lock = threading.Lock()
-_MAX_CACHED_MODELS = 10  # Augmenté pour permettre le chargement de tous les modèles (tiny, base, small, medium, large) + pyannote
-_WHISPER_MODELS = ['tiny', 'base', 'small']  # Tous les modèles Whisper à charger
+_MAX_CACHED_MODELS = 2  # Nombre maximum de modèles en cache (LRU)
 
 # --- AJOUTS : Variables globales pour psutil ---
 WORKER_PROCESS = None
@@ -107,7 +106,7 @@ WORKER_START_TIME = None
 
 @worker_init.connect
 def on_worker_init(**kwargs):
-    """Initialise psutil et charge TOUS les modèles quand le worker démarre."""
+    """Initialise psutil quand le worker démarre."""
     global WORKER_PROCESS, WORKER_START_TIME
     try:
         WORKER_PROCESS = psutil.Process(os.getpid())
@@ -116,59 +115,6 @@ def on_worker_init(**kwargs):
         logger.info(f"Worker {WORKER_PROCESS.pid} initialisé pour monitoring psutil.")
     except Exception as e:
         logger.error(f"Erreur lors de l'initialisation de psutil: {e}")
-    
-    # ✅ CHARGER TOUS LES MODÈLES AU DÉMARRAGE
-    try:
-        logger.info("=" * 80)
-        logger.info("🚀 DÉMARRAGE DU WORKER - Chargement de TOUS les modèles")
-        logger.info("=" * 80)
-        preload_start_time = time.time()
-        
-        # Charger tous les modèles Whisper disponibles
-        logger.info(f"📦 Chargement de {len(_WHISPER_MODELS)} modèles Whisper: {', '.join(_WHISPER_MODELS)}")
-        logger.info("   Note: Chaque TranscriptionService chargera aussi pyannote (diarisation)")
-        logger.info("   ⚠️  Pyannote sera chargé plusieurs fois (une fois par modèle Whisper)")
-        logger.info("   ⚠️  Cela consomme de la RAM mais garantit que tous les modèles sont prêts")
-        loaded_models = []
-        failed_models = []
-        
-        for model_name in _WHISPER_MODELS:
-            try:
-                # Vérifier si le modèle existe avant de le charger
-                model_path = f"/app/models/transcribe/openai-whisper-{model_name}"
-                if not os.path.exists(model_path):
-                    logger.info(f"   ⏭️  Modèle {model_name} non disponible (chemin non trouvé: {model_path})")
-                    failed_models.append(model_name)
-                    continue
-                
-                logger.info(f"   → Chargement du modèle {model_name}...")
-                model_start_time = time.time()
-                # get_transcription_service() va créer un TranscriptionService qui charge :
-                # - Le modèle Whisper demandé
-                # - Le modèle pyannote (diarisation) - chargé une seule fois et partagé
-                get_transcription_service(model_name=model_name)
-                model_load_time = round(time.time() - model_start_time, 2)
-                logger.info(f"   ✅ Modèle {model_name} chargé en {model_load_time}s")
-                loaded_models.append(model_name)
-            except Exception as e:
-                logger.warning(f"   ⚠️ Échec du chargement du modèle {model_name}: {e}")
-                failed_models.append(model_name)
-                # Continuer avec les autres modèles même si un échoue
-        
-        preload_time = round(time.time() - preload_start_time, 2)
-        logger.info("=" * 80)
-        logger.info(f"✅ PRÉCHARGEMENT TERMINÉ")
-        logger.info(f"   - Modèles Whisper chargés: {len(loaded_models)}/{len(_WHISPER_MODELS)}")
-        if loaded_models:
-            logger.info(f"   - Modèles chargés: {', '.join(loaded_models)}")
-        if failed_models:
-            logger.info(f"   - Modèles non disponibles: {', '.join(failed_models)}")
-        logger.info(f"   - Temps total de préchargement: {preload_time}s")
-        logger.info(f"   - Le worker est maintenant PRÊT à traiter des transcriptions")
-        logger.info("=" * 80)
-    except Exception as e:
-        logger.error(f"❌ Erreur lors du préchargement des modèles: {e}", exc_info=True)
-        # Ne pas bloquer le démarrage du worker si le préchargement échoue
 # --- FIN AJOUTS ---
 
 

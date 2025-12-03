@@ -25,7 +25,7 @@ class TranscriptionService:
     def __init__(self, config, model_name: Optional[str] = None):
         """
         Initialise le service de transcription.
-        Charge TOUS les modèles (Whisper + pyannote) au démarrage pour que le worker soit prêt immédiatement.
+        Les modèles sont chargés en lazy loading (quand nécessaire).
         
         Args:
             config: Configuration du worker
@@ -36,34 +36,9 @@ class TranscriptionService:
         self.model_name = model_name or config.model
         self._model_lock = threading.Lock()  # Verrou pour garantir l'usage exclusif du modèle
         
-        # ✅ CHARGEMENT COMPLET AU DÉMARRAGE : Charger tous les modèles immédiatement
-        logger.info("=" * 80)
-        logger.info("🚀 INITIALISATION DU SERVICE DE TRANSCRIPTION")
-        logger.info("=" * 80)
-        init_start_time = time.time()
-        
-        # 1. Charger le modèle Whisper
-        logger.info("📦 ÉTAPE 1/2 : Chargement du modèle Whisper...")
-        whisper_start_time = time.time()
-        self._load_model()
-        whisper_load_time = round(time.time() - whisper_start_time, 2)
-        logger.info(f"✅ Modèle Whisper chargé en {whisper_load_time}s")
-        
-        # 2. Charger le service de diarisation (TOUJOURS, même si diarisation désactivée)
-        logger.info("📦 ÉTAPE 2/2 : Chargement du modèle pyannote (diarisation)...")
-        diarization_start_time = time.time()
-        self._load_diarization_service()
-        diarization_load_time = round(time.time() - diarization_start_time, 2)
-        logger.info(f"✅ Modèle pyannote chargé en {diarization_load_time}s")
-        
-        # Résumé de l'initialisation
-        total_init_time = round(time.time() - init_start_time, 2)
-        logger.info("=" * 80)
-        logger.info(f"✅ SERVICE DE TRANSCRIPTION INITIALISÉ ET PRÊT")
-        logger.info(f"   - Modèle Whisper ({self.model_name}): {whisper_load_time}s")
-        logger.info(f"   - Modèle pyannote: {diarization_load_time}s")
-        logger.info(f"   - Temps total d'initialisation: {total_init_time}s")
-        logger.info("=" * 80)
+        # Lazy loading : les modèles seront chargés quand nécessaire
+        self.model = None
+        self.diarization_service = None
     
     def _load_model(self):
         """Charge le modèle Whisper"""
@@ -101,7 +76,10 @@ class TranscriptionService:
         logger.info(f"⚙️ VAD: {self.config.vad_enabled} | Beam size: {self.config.beam_size} | Best of: {best_of}")
     
     def _load_diarization_service(self):
-        """Charge le service de diarisation (TOUJOURS, même si diarisation désactivée)"""
+        """Charge le service de diarisation (seulement si nécessaire)"""
+        if self.diarization_service is not None:
+            return  # Déjà chargé
+        
         try:
             self.diarization_service = DiarizationService(self.config)
             if self.diarization_service.pipeline is None:
@@ -116,8 +94,10 @@ class TranscriptionService:
         """
         Transcrit un segment audio avec consommation progressive du générateur.
         """
+        # Charger le modèle Whisper en lazy loading
         if self.model is None:
-            raise RuntimeError("Whisper model not loaded")
+            logger.info(f"🔄 Loading Whisper model (lazy loading): {self.model_name}")
+            self._load_model()
         
         segments_list = []
         text_full = ""
@@ -368,6 +348,16 @@ class TranscriptionService:
         log_prefix = f"[{transcription_id}] " if transcription_id else ""
         
         logger.info(f"{log_prefix}📁 Processing file: {file_path.name} | VAD requested: {use_vad}")
+        
+        # Charger le modèle Whisper en lazy loading
+        if self.model is None:
+            logger.info(f"{log_prefix}🔄 Loading Whisper model (lazy loading): {self.model_name}")
+            self._load_model()
+        
+        # Charger le service de diarisation seulement si nécessaire
+        if use_diarization and self.diarization_service is None:
+            logger.info(f"{log_prefix}🔄 Loading diarization service (lazy loading)...")
+            self._load_diarization_service()
         
         segment_paths = []
         processed_path_mono = None
