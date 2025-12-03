@@ -997,11 +997,20 @@ def aggregate_segments_task(self, transcription_id: str):
                         
                         if merged_diarization_segments:
                             transcription_service = get_transcription_service(model_name=metadata.get('whisper_model', 'small'))
-                            all_segments = transcription_service.diarization_service.assign_speakers_to_segments(
-                                all_segments,
-                                merged_diarization_segments
-                            )
-                            logger.info(f"[{transcription_id}] ✅ DISTRIBUTED DIARIZATION | Completed and assigned to segments")
+                            
+                            # Charger le service de diarisation si nécessaire (lazy loading)
+                            if transcription_service.diarization_service is None:
+                                logger.info(f"[{transcription_id}] 🔄 Loading diarization service (lazy loading)...")
+                                transcription_service._load_diarization_service()
+                            
+                            if transcription_service.diarization_service and transcription_service.diarization_service.pipeline:
+                                all_segments = transcription_service.diarization_service.assign_speakers_to_segments(
+                                    all_segments,
+                                    merged_diarization_segments
+                                )
+                                logger.info(f"[{transcription_id}] ✅ DISTRIBUTED DIARIZATION | Completed and assigned to segments")
+                            else:
+                                logger.warning(f"[{transcription_id}] ⚠️ Diarization service not available after loading")
                         else:
                             logger.warning(f"[{transcription_id}] ⚠️ No diarization segments after merging")
                     else:
