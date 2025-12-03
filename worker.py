@@ -7,22 +7,18 @@ import logging
 import time
 import os
 import psutil
-import threading
 import json
 import redis
-import gzip
-import base64
 from pathlib import Path
 from datetime import datetime
 from celery.signals import worker_init
 from celery.worker.control import Panel
-
 from celery import Celery
+
 from config import Config
-from transcription_service import TranscriptionService  # Compatibilité
-from api_client import VocalyxAPIClient  # Compatibilité
-from infrastructure.api.api_client import VocalyxAPIClient as VocalyxAPIClientRefactored
-from application.services.transcription_worker_service import TranscriptionWorkerService
+from infrastructure.api.api_client import VocalyxAPIClient
+from infrastructure.redis.redis_manager import RedisCompressionManager, RedisTranscriptionManager
+from infrastructure.models.model_cache import ModelCache
 from audio_utils import split_audio_intelligent, preprocess_audio, get_audio_duration
 
 config = Config()
@@ -40,26 +36,42 @@ else:
         log_file=config.log_file_path if config.log_file_enabled else None
     )
 
-# --- MODIFICATION 2 : Déclarer les services comme 'None' ---
+# Variables globales pour les services (singletons par worker)
 _api_client = None
-_transcription_service = None
 _redis_client = None
+_redis_manager = None
+_model_cache = None
+
+# Variables globales pour psutil
+WORKER_PROCESS = None
+WORKER_START_TIME = None
+
+
+@worker_init.connect
+def on_worker_init(**kwargs):
+    """Initialise psutil quand le worker démarre."""
+    global WORKER_PROCESS, WORKER_START_TIME
+    try:
+        WORKER_PROCESS = psutil.Process(os.getpid())
+        WORKER_START_TIME = datetime.now()
+        WORKER_PROCESS.cpu_percent(interval=None)
+        logger.info(f"Worker {WORKER_PROCESS.pid} initialisé pour monitoring psutil.")
+    except Exception as e:
+        logger.error(f"Erreur lors de l'initialisation de psutil: {e}")
+
 
 def get_redis_client():
     """Obtient un client Redis pour stocker les résultats des segments"""
     global _redis_client
     if _redis_client is None:
-        # Utiliser la DB Redis dédiée pour les transcriptions (isolation des données)
         redis_url = getattr(config, 'redis_transcription_url', None)
         if not redis_url:
-            # Fallback : utiliser DB 2 de la même instance
-            base_url = config.celery_broker_url.rsplit('/', 1)[0]  # Enlever /0
+            base_url = config.celery_broker_url.rsplit('/', 1)[0]
             redis_url = f"{base_url}/2"
         
         logger.info(f"🔌 Initializing Redis transcription client: {redis_url}")
         _redis_client = redis.from_url(redis_url, decode_responses=True)
         
-        # Test de connexion
         try:
             _redis_client.ping()
             logger.info(f"✅ Redis transcription client connected successfully: {redis_url}")
@@ -69,71 +81,31 @@ def get_redis_client():
     
     return _redis_client
 
-def _compress_json(data: dict) -> str:
-    """Compresse un dictionnaire JSON pour économiser la mémoire Redis"""
-    if not getattr(config, 'redis_transcription_compress', True):
-        return json.dumps(data)
-    
-    json_str = json.dumps(data)
-    compressed = gzip.compress(json_str.encode('utf-8'), compresslevel=6)
-    # Encoder en base64 pour stockage Redis (string)
-    return base64.b64encode(compressed).decode('utf-8')
 
-def _decompress_json(compressed_str: str) -> dict:
-    """Décompresse une chaîne JSON compressée"""
-    if not getattr(config, 'redis_transcription_compress', True):
-        return json.loads(compressed_str)
-    
-    try:
-        # Décoder depuis base64
-        compressed = base64.b64decode(compressed_str.encode('utf-8'))
-        # Décompresser
-        json_str = gzip.decompress(compressed).decode('utf-8')
-        return json.loads(json_str)
-    except Exception as e:
-        # Si la décompression échoue, essayer de parser comme JSON normal (rétrocompatibilité)
-        logger.warning(f"⚠️ Failed to decompress, trying as plain JSON: {e}")
-        return json.loads(compressed_str)
-
-# --- PHASE 3 : Cache de modèles Whisper ---
-_model_cache = {}
-_model_cache_lock = threading.Lock()
-_MAX_CACHED_MODELS = 2  # Nombre maximum de modèles en cache (LRU)
-
-# --- AJOUTS : Variables globales pour psutil ---
-WORKER_PROCESS = None
-WORKER_START_TIME = None
-
-@worker_init.connect
-def on_worker_init(**kwargs):
-    """Initialise psutil quand le worker démarre."""
-    global WORKER_PROCESS, WORKER_START_TIME
-    try:
-        WORKER_PROCESS = psutil.Process(os.getpid())
-        WORKER_START_TIME = datetime.now()
-        WORKER_PROCESS.cpu_percent(interval=None) # Initialiser la mesure
-        logger.info(f"Worker {WORKER_PROCESS.pid} initialisé pour monitoring psutil.")
-    except Exception as e:
-        logger.error(f"Erreur lors de l'initialisation de psutil: {e}")
-# --- FIN AJOUTS ---
+def get_redis_manager() -> RedisTranscriptionManager:
+    """Obtient le gestionnaire Redis pour les opérations de transcription"""
+    global _redis_manager
+    if _redis_manager is None:
+        redis_client = get_redis_client()
+        compression = RedisCompressionManager(
+            enabled=getattr(config, 'redis_transcription_compress', True)
+        )
+        _redis_manager = RedisTranscriptionManager(redis_client, compression)
+    return _redis_manager
 
 
 def get_api_client():
-    """Charge le client API (une fois par worker) - Version refactorisée"""
+    """Charge le client API (une fois par worker)"""
     global _api_client
     if _api_client is None:
         logger.info(f"Initialisation du client API pour ce worker ({config.instance_name})...")
-        _api_client = VocalyxAPIClientRefactored(config)
+        _api_client = VocalyxAPIClient(config)
     return _api_client
 
-def get_worker_service():
-    """Charge le service worker (une fois par worker)"""
-    api_client = get_api_client()
-    return TranscriptionWorkerService(api_client)
 
 def get_transcription_service(model_name: str = 'small'):
     """
-    Charge le service de transcription avec cache par modèle (Phase 3 - Optimisation).
+    Charge le service de transcription avec cache par modèle.
     
     Args:
         model_name: Nom du modèle Whisper (tiny, base, small, medium, large) ou chemin
@@ -141,74 +113,34 @@ def get_transcription_service(model_name: str = 'small'):
     Returns:
         TranscriptionService: Service de transcription avec le modèle demandé
     """
-    global _model_cache, _transcription_service
+    global _model_cache
+    if _model_cache is None:
+        _model_cache = ModelCache(max_models=2)
     
-    # Normaliser le nom du modèle
-    if not model_name:
-        model_name = 'small'
-    else:
-        model_name = model_name.lower()
-        # Si c'est un chemin, extraire le nom du modèle
-        # Ex: "./models/openai-whisper-small" -> "small"
-        if 'openai-whisper-' in model_name:
-            model_name = model_name.split('openai-whisper-')[-1].split('/')[-1].split('\\')[-1]
-        # Si c'est juste un chemin relatif, utiliser 'small' par défaut
-        elif model_name.startswith('./') or model_name.startswith('/'):
-            # Essayer d'extraire le nom du modèle du chemin
-            parts = model_name.replace('\\', '/').split('/')
-            for part in reversed(parts):
-                if part in ['tiny', 'base', 'small', 'medium', 'large']:
-                    model_name = part
-                    break
-            else:
-                model_name = 'small'  # Fallback
-    
-    # Si aucun modèle spécifié, utiliser l'ancien comportement (rétrocompatibilité)
-    if model_name == 'small' and _transcription_service is not None:
-        # Vérifier si le service existant utilise le modèle par défaut
-        if not hasattr(_transcription_service, 'model_name') or _transcription_service.model_name == 'small':
-            return _transcription_service
-    
-    # Utiliser le cache de modèles
-    with _model_cache_lock:
-        # Vérifier si le modèle est déjà en cache
-        if model_name in _model_cache:
-            logger.info(f"✅ Using cached Whisper model: {model_name}")
-            _model_cache[model_name]['last_used'] = time.time()
-            return _model_cache[model_name]['service']
-        
-        # Si le cache est plein, supprimer le moins récemment utilisé (LRU)
-        if len(_model_cache) >= _MAX_CACHED_MODELS:
-            oldest_model = min(_model_cache.keys(), 
-                             key=lambda k: _model_cache[k]['last_used'])
-            logger.info(f"🗑️ Removing least recently used model from cache: {oldest_model}")
-            del _model_cache[oldest_model]
-        
-        # Charger le nouveau modèle
-        logger.info(f"🚀 Loading Whisper model into cache: {model_name} (cache: {len(_model_cache)}/{_MAX_CACHED_MODELS})")
-        try:
-            # Le TranscriptionService charge maintenant TOUS les modèles au démarrage
-            # (Whisper + pyannote) avec des logs détaillés
-            service = TranscriptionService(config, model_name=model_name)
-            _model_cache[model_name] = {
-                'service': service,
-                'last_used': time.time()
-            }
-            logger.info(f"✅ Model {model_name} loaded and cached successfully")
-            
-            # Note: Le message "WORKER PRÊT" est maintenant affiché dans @worker_init
-            # après le chargement de tous les modèles
-            
-            # Si c'est le modèle par défaut (small), mettre à jour aussi _transcription_service pour rétrocompatibilité
-            if model_name == 'small':
-                _transcription_service = service
-            
-            return service
-        except Exception as e:
-            logger.error(f"❌ Failed to load model {model_name}: {e}", exc_info=True)
-            raise
+    return _model_cache.get(model_name, config)
 
-# --- FIN DES MODIFICATIONS GLOBALES ---
+
+def trigger_enrichment_task(transcription_id: str, api_client: VocalyxAPIClient):
+    """Déclenche la tâche d'enrichissement si demandée"""
+    try:
+        from celery import current_app as celery_current_app
+        logger.info(f"[{transcription_id}] 🤖 Enrichment requested, triggering enrichment task...")
+        enrich_task = celery_current_app.send_task(
+            'enrich_transcription',
+            args=[transcription_id],
+            queue='enrichment',
+            countdown=1
+        )
+        logger.info(f"[{transcription_id}] ✅ Enrichment task enqueued: {enrich_task.id}")
+    except Exception as enrich_error:
+        logger.warning(f"[{transcription_id}] ⚠️ Failed to enqueue enrichment task: {enrich_error}")
+        try:
+            api_client.update_transcription(transcription_id, {
+                "enrichment_status": "error",
+                "enrichment_error": f"Failed to enqueue enrichment: {str(enrich_error)}"
+            })
+        except:
+            pass
 
 
 # Créer l'application Celery (connexion au même broker que vocalyx-api)
@@ -308,15 +240,13 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
     
     # Vérifier si on doit utiliser le mode distribué
     if use_distributed is None:
-        from pathlib import Path
         try:
             if file_path:
                 file_path_obj = Path(file_path)
                 if file_path_obj.exists():
                     import soundfile as sf
                     duration = sf.info(str(file_path_obj)).duration
-                    # Utiliser le seuil depuis la config (par défaut 30s)
-                    min_duration = 30  # TODO: Récupérer depuis config si possible
+                    min_duration = 30  # Seuil par défaut
                     use_distributed = duration > min_duration
                     logger.info(
                         f"[{transcription_id}] 📊 DISTRIBUTION DECISION (worker) | "
@@ -330,7 +260,6 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
     
     # Si mode distribué, déléguer à orchestrate_distributed_transcription
     if use_distributed and file_path:
-        from pathlib import Path
         file_path_obj = Path(file_path)
         if file_path_obj.exists():
             logger.info(
@@ -338,9 +267,8 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
                 f"Delegating to orchestrate_distributed_transcription | "
                 f"Worker: {config.instance_name}"
             )
-            from celery import current_app as celery_current_app
             
-            # Envoyer la tâche d'orchestration
+            from celery import current_app as celery_current_app
             orchestrate_task = celery_current_app.send_task(
                 'orchestrate_distributed_transcription',
                 args=[transcription_id, str(file_path)],
@@ -412,11 +340,7 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         
         # 4. Mettre à jour avec les résultats
         logger.info(f"[{transcription_id}] 💾 Saving results to API...")
-        import json
         enrichment_requested = transcription.get('enrichment_requested', False)
-        
-        # Si l'enrichissement est demandé, mettre le statut à "transcribed" au lieu de "done"
-        # Le statut sera changé à "done" uniquement quand l'enrichissement sera terminé
         status = "transcribed" if enrichment_requested else "done"
         
         api_client.update_transcription(transcription_id, {
@@ -433,28 +357,7 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         
         # 5. Si l'enrichissement est demandé, déclencher la tâche d'enrichissement
         if enrichment_requested:
-            try:
-                logger.info(f"[{transcription_id}] 🤖 Enrichment requested, triggering enrichment task...")
-                # Importer la tâche d'enrichissement depuis celery_app
-                from celery import current_app as celery_current_app
-                enrich_task = celery_current_app.send_task(
-                    'enrich_transcription',
-                    args=[transcription_id],
-                    queue='enrichment',  # Utiliser la queue d'enrichissement
-                    countdown=1  # Démarrer après 1 seconde
-                )
-                logger.info(f"[{transcription_id}] ✅ Enrichment task enqueued: {enrich_task.id}")
-            except Exception as enrich_error:
-                logger.warning(f"[{transcription_id}] ⚠️ Failed to enqueue enrichment task: {enrich_error}")
-                # Ne pas échouer la transcription si l'enrichissement échoue à être enqueuée
-                # On met simplement le statut d'enrichissement en erreur
-                try:
-                    api_client.update_transcription(transcription_id, {
-                        "enrichment_status": "error",
-                        "enrichment_error": f"Failed to enqueue enrichment: {str(enrich_error)}"
-                    })
-                except:
-                    pass
+            trigger_enrichment_task(transcription_id, api_client)
         
         return {
             "status": "success",
@@ -562,9 +465,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             raise ValueError("No segments created")
         
         # 3. Stocker les métadonnées dans Redis
-        redis_client = get_redis_client()
-        segments_key = f"transcription:{transcription_id}:segments"
-        # Timestamp de début pour calculer le temps réel écoulé
+        redis_manager = get_redis_manager()
         orchestration_start_time = time.time()
         
         segments_metadata = {
@@ -579,19 +480,12 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             "processed_path_stereo": str(preprocessed.get('stereo')) if preprocessed.get('stereo') else None,
             "is_stereo": preprocessed.get('is_stereo', False),
             "original_duration": get_audio_duration(file_path_obj),
-            "orchestration_start_time": orchestration_start_time  # Timestamp de début pour calculer le temps réel
+            "orchestration_start_time": orchestration_start_time
         }
-        # Stocker avec compression si activée
-        ttl = getattr(config, 'redis_transcription_ttl', 3600)
-        segments_data = _compress_json(segments_metadata) if getattr(config, 'redis_transcription_compress', True) else json.dumps(segments_metadata)
-        redis_client.setex(segments_key, ttl, segments_data)
         
-        # Initialiser le compteur atomique à 0 (pour éviter les race conditions)
-        counter_key = f"transcription:{transcription_id}:completed_count"
-        # Utiliser set au lieu de setex pour s'assurer que c'est bien un entier
-        redis_client.delete(counter_key)  # S'assurer qu'il n'existe pas déjà
-        redis_client.set(counter_key, 0)
-        redis_client.expire(counter_key, 3600)  # Expire après 1h
+        ttl = getattr(config, 'redis_transcription_ttl', 3600)
+        redis_manager.store_metadata(transcription_id, segments_metadata, ttl)
+        redis_manager.reset_completed_count(transcription_id)
         
         # 4. Créer une tâche pour chaque segment
         logger.info(
@@ -604,9 +498,6 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         from celery import current_app as celery_current_app
         
         for i, segment_path in enumerate(segment_paths):
-            # Calculer l'offset temporel (start_time) pour ce segment
-            # On va le calculer approximativement en fonction de l'index
-            # Le worker de segment pourra ajuster avec la durée réelle
             segment_task = celery_current_app.send_task(
                 'transcribe_segment',
                 args=[transcription_id, str(segment_path), i, num_segments],
@@ -621,6 +512,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             )
         
         # 5. Stocker les IDs des tâches
+        redis_client = get_redis_client()
         tasks_key = f"transcription:{transcription_id}:segment_tasks"
         redis_client.setex(tasks_key, 3600, json.dumps(segment_tasks))
         
@@ -679,19 +571,12 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
     
     try:
         # Récupérer les métadonnées depuis Redis
-        redis_client = get_redis_client()
-        segments_key = f"transcription:{transcription_id}:segments"
-        metadata_json = redis_client.get(segments_key)
+        redis_manager = get_redis_manager()
+        metadata = redis_manager.get_metadata(transcription_id)
         
-        if not metadata_json:
+        if not metadata:
             raise ValueError(f"Metadata not found for transcription {transcription_id}")
         
-        # Décompresser si nécessaire
-        try:
-            metadata = _decompress_json(metadata_json)
-        except:
-            # Fallback : essayer comme JSON normal (rétrocompatibilité)
-            metadata = json.loads(metadata_json)
         use_vad = metadata.get('use_vad', True)
         whisper_model = metadata.get('whisper_model', 'small')
         
@@ -716,31 +601,14 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         processing_time = round(time.time() - start_time, 2)
         
         # Calculer l'offset temporel pour ce segment
-        # On utilise la durée cumulée des segments précédents
         time_offset = 0.0
         if segment_index > 0:
-            # Récupérer les résultats des segments précédents pour calculer l'offset
             for prev_idx in range(segment_index):
-                prev_result_key = f"transcription:{transcription_id}:segment:{prev_idx}:result"
-                prev_result_json = redis_client.get(prev_result_key)
-                if prev_result_json:
-                    try:
-                        # Décompresser si nécessaire (comme pour les métadonnées)
-                        try:
-                            prev_result = _decompress_json(prev_result_json)
-                        except:
-                            # Fallback : essayer comme JSON normal (rétrocompatibilité)
-                            prev_result = json.loads(prev_result_json)
-                        
-                        if prev_result.get('segments'):
-                            # Prendre le dernier timestamp du segment précédent
-                            last_segment = prev_result['segments'][-1]
-                            time_offset = last_segment.get('end', 0.0)
-                            break  # On prend le dernier segment disponible
-                    except (json.JSONDecodeError, KeyError, IndexError) as e:
-                        # Si le segment précédent n'est pas encore disponible ou invalide, ignorer
-                        logger.debug(f"[{transcription_id}] Segment {prev_idx} not yet available or invalid, skipping offset calculation: {e}")
-                        continue
+                prev_result = redis_manager.get_segment_result(transcription_id, prev_idx)
+                if prev_result and prev_result.get('segments'):
+                    last_segment = prev_result['segments'][-1]
+                    time_offset = last_segment.get('end', 0.0)
+                    break
         
         # Ajuster les timestamps avec l'offset
         adjusted_segments = []
@@ -761,22 +629,13 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
             "time_offset": time_offset
         }
         
-        result_key = f"transcription:{transcription_id}:segment:{segment_index}:result"
-        # Stocker avec compression si activée
         ttl = getattr(config, 'redis_transcription_ttl', 3600)
-        result_data = _compress_json(result) if getattr(config, 'redis_transcription_compress', True) else json.dumps(result)
-        redis_client.setex(result_key, ttl, result_data)
+        redis_manager.store_segment_result(transcription_id, segment_index, result, ttl)
+        completed_count = redis_manager.increment_completed_count(transcription_id)
         
-        # Incrémenter le compteur de segments complétés de manière atomique (évite les race conditions)
-        counter_key = f"transcription:{transcription_id}:completed_count"
-        completed_count = int(redis_client.incr(counter_key))  # S'assurer que c'est un entier
-        redis_client.expire(counter_key, 3600)  # Expire après 1h
-        
-        # Mettre à jour les métadonnées (sans le compteur, il est géré séparément)
+        # Mettre à jour les métadonnées
         metadata['completed_segments'] = completed_count
-        ttl = getattr(config, 'redis_transcription_ttl', 3600)
-        metadata_data = _compress_json(metadata) if getattr(config, 'redis_transcription_compress', True) else json.dumps(metadata)
-        redis_client.setex(segments_key, ttl, metadata_data)
+        redis_manager.store_metadata(transcription_id, metadata, ttl)
         
         logger.info(
             f"[{transcription_id}] ✅ DISTRIBUTED SEGMENT COMPLETED | "
@@ -787,13 +646,8 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         )
         
         # Si tous les segments sont terminés, déclencher l'agrégation
-        # Utiliser une opération atomique pour éviter les déclenchements multiples
         if completed_count >= total_segments:
-            # Utiliser un verrou Redis pour s'assurer qu'un seul worker déclenche l'agrégation
-            lock_key = f"transcription:{transcription_id}:aggregation_lock"
-            lock_acquired = redis_client.set(lock_key, "1", ex=300, nx=True)  # nx=True = set only if not exists
-            
-            if lock_acquired:
+            if redis_manager.acquire_aggregation_lock(transcription_id):
                 logger.info(
                     f"[{transcription_id}] 🎉 DISTRIBUTED MODE | All segments completed | "
                     f"Total: {total_segments} segments | "
@@ -851,21 +705,12 @@ def aggregate_segments_task(self, transcription_id: str):
     start_time = time.time()
     
     try:
-        redis_client = get_redis_client()
+        redis_manager = get_redis_manager()
+        metadata = redis_manager.get_metadata(transcription_id)
         
-        # Récupérer les métadonnées
-        segments_key = f"transcription:{transcription_id}:segments"
-        metadata_json = redis_client.get(segments_key)
-        
-        if not metadata_json:
+        if not metadata:
             raise ValueError(f"Metadata not found for transcription {transcription_id}")
         
-        # Décompresser si nécessaire
-        try:
-            metadata = _decompress_json(metadata_json)
-        except:
-            # Fallback : essayer comme JSON normal (rétrocompatibilité)
-            metadata = json.loads(metadata_json)
         total_segments = metadata['total_segments']
         use_diarization = metadata.get('use_diarization', False)
         
@@ -877,27 +722,19 @@ def aggregate_segments_task(self, transcription_id: str):
         all_segments = []
         full_text = ""
         language_detected = None
-        max_segment_time = 0.0  # Temps maximum d'un segment (car traitement en parallèle)
-        segment_processing_times = []  # Pour statistiques
+        max_segment_time = 0.0
+        segment_processing_times = []
         
         for i in range(total_segments):
-            result_key = f"transcription:{transcription_id}:segment:{i}:result"
-            result_json = redis_client.get(result_key)
-            
-            if not result_json:
+            result = redis_manager.get_segment_result(transcription_id, i)
+            if not result:
                 raise ValueError(f"Result not found for segment {i} of transcription {transcription_id}")
             
-            # Décompresser si nécessaire
-            try:
-                result = _decompress_json(result_json)
-            except:
-                # Fallback : essayer comme JSON normal (rétrocompatibilité)
-                result = json.loads(result_json)
             all_segments.extend(result['segments'])
             full_text += result['text'] + " "
             segment_time = result.get('processing_time', 0.0)
             segment_processing_times.append(segment_time)
-            max_segment_time = max(max_segment_time, segment_time)  # Temps max car traitement en parallèle
+            max_segment_time = max(max_segment_time, segment_time)
             
             if language_detected is None:
                 language_detected = result.get('language')
@@ -980,18 +817,9 @@ def aggregate_segments_task(self, transcription_id: str):
             f"Result saved to database"
         )
         
-        # Nettoyer les données Redis (utiliser pipeline pour performance)
+        # Nettoyer les données Redis
         try:
-            # Utiliser un pipeline Redis pour supprimer toutes les clés en une seule opération
-            pipe = redis_client.pipeline()
-            for i in range(total_segments):
-                pipe.delete(f"transcription:{transcription_id}:segment:{i}:result")
-            pipe.delete(segments_key)
-            pipe.delete(f"transcription:{transcription_id}:segment_tasks")
-            pipe.delete(f"transcription:{transcription_id}:completed_count")
-            pipe.delete(f"transcription:{transcription_id}:aggregation_lock")
-            pipe.execute()  # Exécuter toutes les suppressions en une seule fois
-            logger.debug(f"[{transcription_id}] 🧹 Redis cleanup completed (pipeline)")
+            redis_manager.cleanup(transcription_id, total_segments)
             
             # Nettoyer les fichiers temporaires
             from audio_utils import cleanup_segments
@@ -1012,17 +840,7 @@ def aggregate_segments_task(self, transcription_id: str):
         
         # Déclencher l'enrichissement si demandé
         if enrichment_requested:
-            try:
-                from celery import current_app as celery_current_app
-                enrich_task = celery_current_app.send_task(
-                    'enrich_transcription',
-                    args=[transcription_id],
-                    queue='enrichment',
-                    countdown=1
-                )
-                logger.info(f"[{transcription_id}] ✅ Enrichment task enqueued: {enrich_task.id}")
-            except Exception as enrich_error:
-                logger.warning(f"[{transcription_id}] ⚠️ Failed to enqueue enrichment task: {enrich_error}")
+            trigger_enrichment_task(transcription_id, api_client)
         
         return {
             "status": "success",
