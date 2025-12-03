@@ -982,9 +982,18 @@ class DiarizationService:
                                 original_httpx_client_request = httpx.Client.request
                                 
                                 def patched_httpx_client_init(self, *args, **kwargs):
+                                    """
+                                    Initialise httpx.Client en patchant la méthode request
+                                    pour rediriger les appels vers HuggingFace en local.
+                                    
+                                    ⚠️ Important : on utilise toujours la méthode
+                                    originale stockée dans original_httpx_client_request
+                                    (capturée dans la closure), pour éviter toute
+                                    récursion si __init__ est appelé plusieurs fois
+                                    sur la même instance.
+                                    """
+                                    # Appeler l'__init__ original
                                     original_httpx_client_init(self, *args, **kwargs)
-                                    # Sauvegarder la méthode request originale
-                                    self._original_request = self.request
                                     
                                     def patched_request(method, url, **req_kwargs):
                                         if isinstance(url, str) and 'huggingface.co' in url:
@@ -1082,8 +1091,9 @@ class DiarizationService:
                                                                     pass
                                                             
                                                             return MockHttpxResponse(local_path)
-                                        # Sinon, utiliser la méthode originale
-                                        return self._original_request(method, url, **req_kwargs)
+                                        # Sinon, utiliser la méthode originale (non patchée)
+                                        # en appelant directement original_httpx_client_request
+                                        return original_httpx_client_request(self, method, url, **req_kwargs)
                                     
                                     self.request = patched_request
                                 
