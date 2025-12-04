@@ -90,7 +90,15 @@ class Config:
             'enabled': 'false',
             'model': 'pyannote/speaker-diarization-3.1',
             'model_path': '/app/models/transcribe/pyannote-speaker-diarization',
-            'hf_token': ''
+            'hf_token': '',
+            # Paramètres d'optimisation de performance
+            'min_speakers': '',  # Nombre minimum de locuteurs (vide = auto)
+            'max_speakers': '',  # Nombre maximum de locuteurs (vide = auto)
+            'chunk_duration_s': '600',  # Traitement par chunks pour fichiers > 10min (0 = désactivé)
+            'chunk_overlap_s': '5',  # Chevauchement entre chunks (secondes)
+            'segmentation_threshold': '0.5',  # Seuil de segmentation (0.0-1.0)
+            'clustering_threshold': '0.7',  # Seuil de clustering (0.0-1.0)
+            'use_gpu_if_available': 'true'  # Utiliser GPU si disponible
         }
         
         config['LOGGING'] = {
@@ -283,6 +291,38 @@ class Config:
             'HF_TOKEN',
             self.config.get('DIARIZATION', 'hf_token', fallback='')
         )
+        
+        # Paramètres d'optimisation de la diarization
+        min_speakers_str = os.environ.get(
+            'DIARIZATION_MIN_SPEAKERS',
+            self.config.get('DIARIZATION', 'min_speakers', fallback='')
+        )
+        self.diarization_min_speakers = int(min_speakers_str) if min_speakers_str and min_speakers_str.isdigit() else None
+        
+        max_speakers_str = os.environ.get(
+            'DIARIZATION_MAX_SPEAKERS',
+            self.config.get('DIARIZATION', 'max_speakers', fallback='')
+        )
+        self.diarization_max_speakers = int(max_speakers_str) if max_speakers_str and max_speakers_str.isdigit() else None
+        
+        self.diarization_chunk_duration_s = self.config.getint(
+            'DIARIZATION', 'chunk_duration_s', fallback=600
+        )
+        self.diarization_chunk_overlap_s = self.config.getint(
+            'DIARIZATION', 'chunk_overlap_s', fallback=5
+        )
+        self.diarization_segmentation_threshold = self.config.getfloat(
+            'DIARIZATION', 'segmentation_threshold', fallback=0.5
+        )
+        self.diarization_clustering_threshold = self.config.getfloat(
+            'DIARIZATION', 'clustering_threshold', fallback=0.7
+        )
+        
+        use_gpu_str = os.environ.get(
+            'DIARIZATION_USE_GPU',
+            self.config.get('DIARIZATION', 'use_gpu_if_available', fallback='true')
+        )
+        self.diarization_use_gpu = use_gpu_str.lower() in ['true', '1', 't']
     
     def reload(self):
         """Recharge la configuration depuis le fichier"""

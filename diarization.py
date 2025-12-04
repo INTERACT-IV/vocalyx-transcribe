@@ -1255,14 +1255,19 @@ class DiarizationService:
             
             # Déplacer le pipeline sur le bon device (CPU ou GPU)
             if torch is not None:
-                device_name = getattr(self.config, 'device', 'cpu')
-                device = torch.device(device_name)
-                if device.type == 'cuda' and torch.cuda.is_available():
-                    self.pipeline.to(torch.device('cuda'))
-                    logger.info("✅ Diarization model loaded on GPU")
+                use_gpu = getattr(self.config, 'diarization_use_gpu', True)
+                
+                if use_gpu and torch.cuda.is_available():
+                    device = torch.device('cuda')
+                    self.pipeline.to(device)
+                    logger.info("✅ Diarization model loaded on GPU (optimized for speed)")
                 else:
-                    self.pipeline.to(torch.device('cpu'))
-                    logger.info("✅ Diarization model loaded on CPU")
+                    device = torch.device('cpu')
+                    self.pipeline.to(device)
+                    if use_gpu:
+                        logger.info("⚠️ GPU requested but not available, using CPU")
+                    else:
+                        logger.info("✅ Diarization model loaded on CPU")
             else:
                 logger.warning("⚠️ torch not available, model will use default device")
                 
@@ -1278,7 +1283,7 @@ class DiarizationService:
     
     def diarize(self, audio_path: Path) -> List[Dict[str, float]]:
         """
-        Effectue la diarisation sur un fichier audio.
+        Effectue la diarisation sur un fichier audio avec optimisations.
         
         Args:
             audio_path: Chemin vers le fichier audio
@@ -1292,13 +1297,60 @@ class DiarizationService:
             return []
         
         try:
-            logger.info(f"🎤 Running diarization on {audio_path.name}...")
+            from audio_utils import get_audio_duration
             
-            # Exécuter la diarisation
-            diarization = self.pipeline(str(audio_path))
+            audio_duration = get_audio_duration(audio_path)
+            logger.info(f"🎤 Running diarization on {audio_path.name} (duration: {audio_duration:.1f}s)...")
+            
+            # Vérifier si on doit utiliser le traitement par chunks
+            chunk_duration = getattr(self.config, 'diarization_chunk_duration_s', 600)
+            
+            if chunk_duration > 0 and audio_duration > chunk_duration:
+                # Traitement par chunks pour les longs fichiers
+                logger.info(f"⚡ Using chunk-based diarization (chunk size: {chunk_duration}s)")
+                return self._diarize_in_chunks(audio_path, audio_duration, chunk_duration)
+            else:
+                # Traitement normal pour les fichiers courts
+                return self._diarize_single(audio_path)
+            
+        except Exception as e:
+            logger.error(f"❌ Error during diarization: {e}", exc_info=True)
+            return []
+    
+    def _diarize_single(self, audio_path: Path) -> List[Dict[str, float]]:
+        """
+        Effectue la diarisation sur un fichier audio entier.
+        
+        Args:
+            audio_path: Chemin vers le fichier audio
+            
+        Returns:
+            Liste de dictionnaires avec les segments de chaque locuteur
+        """
+        try:
+            # Préparer les paramètres du pipeline
+            diarization_params = {}
+            
+            # Ajouter min_speakers si configuré
+            min_speakers = getattr(self.config, 'diarization_min_speakers', None)
+            if min_speakers is not None:
+                diarization_params['min_speakers'] = min_speakers
+                logger.info(f"⚙️ Diarization: min_speakers={min_speakers}")
+            
+            # Ajouter max_speakers si configuré
+            max_speakers = getattr(self.config, 'diarization_max_speakers', None)
+            if max_speakers is not None:
+                diarization_params['max_speakers'] = max_speakers
+                logger.info(f"⚙️ Diarization: max_speakers={max_speakers}")
+            
+            # Exécuter la diarisation avec paramètres
+            if diarization_params:
+                # pyannote.audio 3.x accepte ces paramètres directement
+                diarization = self.pipeline(str(audio_path), **diarization_params)
+            else:
+                diarization = self.pipeline(str(audio_path))
             
             # Extraire l'annotation depuis DiarizeOutput (pyannote.audio 3.1+)
-            # DiarizeOutput contient speaker_diarization qui est une Annotation
             if not hasattr(diarization, 'speaker_diarization'):
                 # Fallback vers exclusive_speaker_diarization si disponible
                 if hasattr(diarization, 'exclusive_speaker_diarization'):
@@ -1330,8 +1382,172 @@ class DiarizationService:
             return segments
             
         except Exception as e:
-            logger.error(f"❌ Error during diarization: {e}", exc_info=True)
+            logger.error(f"❌ Error during single diarization: {e}", exc_info=True)
             return []
+    
+    def _diarize_in_chunks(self, audio_path: Path, audio_duration: float, chunk_duration: float) -> List[Dict[str, float]]:
+        """
+        Effectue la diarisation sur un fichier audio en le découpant en chunks.
+        Optimisé pour les longs fichiers audio (> 10 minutes).
+        
+        Args:
+            audio_path: Chemin vers le fichier audio
+            audio_duration: Durée totale de l'audio en secondes
+            chunk_duration: Durée de chaque chunk en secondes
+            
+        Returns:
+            Liste de dictionnaires avec les segments de chaque locuteur
+        """
+        try:
+            from pydub import AudioSegment
+            import tempfile
+            from pathlib import Path as PathLib
+            
+            chunk_overlap = getattr(self.config, 'diarization_chunk_overlap_s', 5)
+            min_speakers = getattr(self.config, 'diarization_min_speakers', None)
+            max_speakers = getattr(self.config, 'diarization_max_speakers', None)
+            
+            logger.info(f"⚡ Processing {audio_duration:.1f}s audio in chunks of {chunk_duration}s (overlap: {chunk_overlap}s)")
+            
+            # Charger l'audio
+            audio = AudioSegment.from_file(str(audio_path))
+            total_segments = []
+            temp_files = []
+            
+            # Traiter par chunks avec chevauchement
+            num_chunks = int((audio_duration + chunk_overlap) / (chunk_duration - chunk_overlap)) + 1
+            
+            for chunk_idx in range(num_chunks):
+                start_time = chunk_idx * (chunk_duration - chunk_overlap)
+                end_time = min(start_time + chunk_duration, audio_duration)
+                
+                if start_time >= audio_duration:
+                    break
+                
+                logger.info(f"🔄 Processing chunk {chunk_idx + 1}/{num_chunks}: {start_time:.1f}s - {end_time:.1f}s")
+                
+                # Extraire le chunk
+                chunk_start_ms = int(start_time * 1000)
+                chunk_end_ms = int(end_time * 1000)
+                chunk_audio = audio[chunk_start_ms:chunk_end_ms]
+                
+                # Sauvegarder temporairement
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                    tmp_path = PathLib(tmp_file.name)
+                    chunk_audio.export(str(tmp_path), format='wav')
+                    temp_files.append(tmp_path)
+                
+                try:
+                    # Diariser le chunk
+                    diarization_params = {}
+                    if min_speakers is not None:
+                        diarization_params['min_speakers'] = min_speakers
+                    if max_speakers is not None:
+                        diarization_params['max_speakers'] = max_speakers
+                    
+                    if diarization_params:
+                        diarization = self.pipeline(str(tmp_path), **diarization_params)
+                    else:
+                        diarization = self.pipeline(str(tmp_path))
+                    
+                    # Extraire l'annotation
+                    if hasattr(diarization, 'speaker_diarization'):
+                        annotation = diarization.speaker_diarization
+                    elif hasattr(diarization, 'exclusive_speaker_diarization'):
+                        annotation = diarization.exclusive_speaker_diarization
+                    else:
+                        logger.warning(f"⚠️ Chunk {chunk_idx + 1}: Could not extract annotation")
+                        continue
+                    
+                    # Convertir les segments et ajuster les timestamps
+                    chunk_offset = start_time
+                    for turn, _, speaker in annotation.itertracks(yield_label=True):
+                        total_segments.append({
+                            "start": round(turn.start + chunk_offset, 2),
+                            "end": round(turn.end + chunk_offset, 2),
+                            "speaker": speaker
+                        })
+                    
+                    logger.info(f"✅ Chunk {chunk_idx + 1}/{num_chunks}: {len([s for s in total_segments if chunk_offset <= s['start'] < chunk_offset + chunk_duration])} segments")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error processing chunk {chunk_idx + 1}: {e}", exc_info=True)
+                    continue
+                finally:
+                    # Nettoyer le fichier temporaire
+                    try:
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                    except:
+                        pass
+            
+            # Fusionner les segments qui se chevauchent dans la zone d'overlap
+            total_segments = self._merge_overlapping_segments(total_segments, chunk_overlap)
+            
+            # Trier par timestamp
+            total_segments.sort(key=lambda x: x['start'])
+            
+            # Compter le nombre de locuteurs uniques
+            unique_speakers = set(seg["speaker"] for seg in total_segments)
+            logger.info(
+                f"✅ Chunk-based diarization completed: {len(total_segments)} segments, "
+                f"{len(unique_speakers)} speaker(s) detected"
+            )
+            
+            return total_segments
+            
+        except Exception as e:
+            logger.error(f"❌ Error during chunk-based diarization: {e}", exc_info=True)
+            return []
+    
+    def _merge_overlapping_segments(self, segments: List[Dict], overlap_duration: float) -> List[Dict]:
+        """
+        Fusionne les segments qui se chevauchent dans la zone d'overlap entre chunks.
+        Prend le locuteur avec le plus grand chevauchement.
+        
+        Args:
+            segments: Liste de segments
+            overlap_duration: Durée de chevauchement en secondes
+            
+        Returns:
+            Liste de segments fusionnés
+        """
+        if not segments:
+            return segments
+        
+        # Trier par timestamp
+        segments = sorted(segments, key=lambda x: (x['start'], x['end']))
+        merged = []
+        
+        for current in segments:
+            if not merged:
+                merged.append(current)
+                continue
+            
+            previous = merged[-1]
+            
+            # Vérifier si les segments se chevauchent dans la zone d'overlap
+            overlap_start = max(previous['start'], current['start'])
+            overlap_end = min(previous['end'], current['end'])
+            overlap = max(0, overlap_end - overlap_start)
+            
+            # Si le chevauchement est dans la zone d'overlap prévue et significatif
+            if overlap > 0 and overlap <= overlap_duration + 1.0:  # Tolérance de 1s
+                # Prendre le locuteur avec le plus grand chevauchement
+                prev_overlap = min(previous['end'], current['end']) - max(previous['start'], current['start'])
+                if prev_overlap > overlap / 2:
+                    # Le segment précédent a plus de poids
+                    merged[-1] = previous
+                    continue
+                else:
+                    # Le segment courant a plus de poids, remplacer
+                    merged[-1] = current
+                    continue
+            
+            # Pas de chevauchement significatif, ajouter comme nouveau segment
+            merged.append(current)
+        
+        return merged
     
     def assign_speakers_to_segments(
         self, 
