@@ -283,6 +283,16 @@ class Config:
             self.config.get('DIARIZATION', 'enabled', fallback='false')
         )
         self.diarization_enabled = diarization_enabled_str.lower() in ['true', '1', 't']
+        
+        # Type de diarisation: 'pyannote' (ML lourd) ou 'stereo' (séparation de canaux, très rapide)
+        self.diarization_type = os.environ.get(
+            'DIARIZATION_TYPE',
+            self.config.get('DIARIZATION', 'type', fallback='stereo')
+        )
+        if self.diarization_type not in ['pyannote', 'stereo']:
+            logger.warning(f"⚠️ Invalid diarization type '{self.diarization_type}', using 'stereo'")
+            self.diarization_type = 'stereo'
+        
         self.diarization_model = os.environ.get(
             'DIARIZATION_MODEL',
             self.config.get('DIARIZATION', 'model', fallback='pyannote/speaker-diarization-3.1')
@@ -346,6 +356,19 @@ class Config:
             self.config.get('DIARIZATION', 'fast_mode', fallback='false')
         )
         self.diarization_fast_mode = fast_mode_str.lower() in ['true', '1', 't']
+        
+        # Paramètres pour diarisation stéréo (légère et rapide)
+        silence_thresh_str = os.environ.get(
+            'STEREO_DIARIZATION_SILENCE_THRESH',
+            self.config.get('DIARIZATION', 'stereo_silence_thresh', fallback='-40')
+        )
+        self.stereo_diarization_silence_thresh = int(silence_thresh_str) if silence_thresh_str.lstrip('-').isdigit() else -40
+        
+        min_speech_ms_str = os.environ.get(
+            'STEREO_DIARIZATION_MIN_SPEECH_MS',
+            self.config.get('DIARIZATION', 'stereo_min_speech_ms', fallback='250')
+        )
+        self.stereo_diarization_min_speech_ms = int(min_speech_ms_str) if min_speech_ms_str.isdigit() else 250
     
     def reload(self):
         """Recharge la configuration depuis le fichier"""

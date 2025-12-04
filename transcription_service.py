@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from faster_whisper import WhisperModel
 from audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
 from diarization import DiarizationService
+from stereo_diarization import StereoDiarizationService
 
 # Imports non utilisés (TimeoutError, signal, contextmanager) supprimés
 logger = logging.getLogger("vocalyx")
@@ -81,11 +82,22 @@ class TranscriptionService:
             return  # Déjà chargé
         
         try:
-            self.diarization_service = DiarizationService(self.config)
-            if self.diarization_service.pipeline is None:
-                logger.info("ℹ️ Diarization service initialized but model not available (will be skipped if requested)")
+            # Déterminer le type de diarisation à utiliser
+            diarization_type = getattr(self.config, 'diarization_type', 'stereo')
+            
+            if diarization_type == 'stereo':
+                # Utiliser la diarisation stéréo (légère et rapide)
+                logger.info("🎯 Using stereo diarization (lightweight, no ML models)")
+                self.diarization_service = StereoDiarizationService(self.config)
+                logger.info("✅ Stereo diarization service initialized and ready")
             else:
-                logger.info("✅ Diarization service initialized and ready")
+                # Utiliser pyannote.audio (ML lourd mais plus flexible)
+                logger.info("🎯 Using pyannote diarization (ML-based)")
+                self.diarization_service = DiarizationService(self.config)
+                if self.diarization_service.pipeline is None:
+                    logger.info("ℹ️ Diarization service initialized but model not available (will be skipped if requested)")
+                else:
+                    logger.info("✅ Diarization service initialized and ready")
         except Exception as e:
             logger.warning(f"⚠️ Failed to initialize diarization service: {e} (will be skipped if requested)")
             self.diarization_service = None
