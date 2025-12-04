@@ -970,7 +970,8 @@ def aggregate_segments_task(self, transcription_id: str):
         )
         
         # Trier les segments par timestamp (au cas où ils arrivent dans le désordre)
-        all_segments.sort(key=lambda x: x['start'])
+        # Tri par start, puis par end pour gérer les chevauchements de manière cohérente
+        all_segments.sort(key=lambda x: (x['start'], x['end']))
         logger.info(
             f"[{transcription_id}] 🔄 DISTRIBUTED AGGREGATION | Step 2/3: Segments sorted by timestamp | "
             f"Total segments: {len(all_segments)}"
@@ -1055,6 +1056,11 @@ def aggregate_segments_task(self, transcription_id: str):
                         logger.warning(f"[{transcription_id}] ⚠️ Diarization requested but service not available (check model configuration)")
             except Exception as e:
                 logger.error(f"[{transcription_id}] ❌ Diarization error: {e}", exc_info=True)
+        
+        # ⚠️ IMPORTANT : Reconstruire le texte final APRÈS toutes les modifications (tri + diarisation)
+        # pour garantir que le texte correspond exactement à l'ordre chronologique des segments
+        # et que chaque segment avec son texte est pris en compte dans l'ordre correct
+        full_text = " ".join(seg.get('text', '') for seg in all_segments if seg.get('text', '').strip())
         
         # Sauvegarder le résultat final
         api_client = get_api_client()
