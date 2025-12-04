@@ -473,23 +473,33 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         if use_diarization:
             diarization_audio_path = preprocessed.get('stereo') if preprocessed.get('stereo') else processed_path_mono
             if diarization_audio_path and Path(diarization_audio_path).exists():
-                logger.info(f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION | Preparing diarization segments...")
-                # Réutiliser les segments existants pour la diarisation
-                diarization_segment_paths = segment_paths
-                # Calculer les offsets temporels pour chaque segment
-                current_offset = 0.0
-                for i, seg_path in enumerate(segment_paths):
-                    diarization_time_offsets.append(current_offset)
-                    # Estimer la durée du segment
-                    try:
-                        import soundfile as sf
-                        seg_duration = sf.info(str(seg_path)).duration
-                        current_offset += seg_duration
-                    except:
-                        # Fallback : utiliser la durée moyenne estimée
-                        estimated_duration = get_audio_duration(file_path_obj) / num_segments
-                        current_offset += estimated_duration
-                logger.info(f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION | Prepared {len(diarization_segment_paths)} segments for diarization")
+                # Vérifier le type de diarisation
+                diarization_type = getattr(config, 'diarization_type', 'stereo')
+                
+                if diarization_type == 'stereo' and preprocessed.get('stereo'):
+                    # Pour la diarisation stéréo : utiliser le fichier stéréo complet (une seule tâche)
+                    # La diarisation stéréo est très rapide, pas besoin de découper
+                    logger.info(f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION | Using stereo diarization with full stereo file (no segmentation needed)")
+                    diarization_segment_paths = [Path(preprocessed.get('stereo'))]
+                    diarization_time_offsets = [0.0]  # Pas d'offset nécessaire pour un fichier complet
+                else:
+                    # Pour pyannote ou mono : utiliser les segments (comportement original)
+                    logger.info(f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION | Preparing diarization segments...")
+                    diarization_segment_paths = segment_paths
+                    # Calculer les offsets temporels pour chaque segment
+                    current_offset = 0.0
+                    for i, seg_path in enumerate(segment_paths):
+                        diarization_time_offsets.append(current_offset)
+                        # Estimer la durée du segment
+                        try:
+                            import soundfile as sf
+                            seg_duration = sf.info(str(seg_path)).duration
+                            current_offset += seg_duration
+                        except:
+                            # Fallback : utiliser la durée moyenne estimée
+                            estimated_duration = get_audio_duration(file_path_obj) / num_segments
+                            current_offset += estimated_duration
+                logger.info(f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION | Prepared {len(diarization_segment_paths)} segment(s) for diarization")
         
         # 4. Stocker les métadonnées dans Redis
         redis_manager = get_redis_manager()
