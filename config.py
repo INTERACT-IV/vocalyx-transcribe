@@ -94,11 +94,15 @@ class Config:
             # Paramètres d'optimisation de performance
             'min_speakers': '',  # Nombre minimum de locuteurs (vide = auto)
             'max_speakers': '',  # Nombre maximum de locuteurs (vide = auto)
-            'chunk_duration_s': '600',  # Traitement par chunks pour fichiers > 10min (0 = désactivé)
+            'chunk_duration_s': '300',  # Traitement par chunks (0 = désactivé, 300 = 5min recommandé pour réduire CPU)
             'chunk_overlap_s': '5',  # Chevauchement entre chunks (secondes)
             'segmentation_threshold': '0.5',  # Seuil de segmentation (0.0-1.0)
             'clustering_threshold': '0.7',  # Seuil de clustering (0.0-1.0)
-            'use_gpu_if_available': 'true'  # Utiliser GPU si disponible
+            'use_gpu_if_available': 'true',  # Utiliser GPU si disponible
+            # Optimisations CPU
+            'num_threads': '0',  # Nombre de threads PyTorch (0 = tous, 2-4 = recommandé pour réduire CPU)
+            'reduce_resolution': 'false',  # Réduire résolution audio (true = 8kHz, plus rapide)
+            'fast_mode': 'false'  # Mode économique (moins de CPU, légèrement moins précis)
         }
         
         config['LOGGING'] = {
@@ -306,7 +310,7 @@ class Config:
         self.diarization_max_speakers = int(max_speakers_str) if max_speakers_str and max_speakers_str.isdigit() else None
         
         self.diarization_chunk_duration_s = self.config.getint(
-            'DIARIZATION', 'chunk_duration_s', fallback=600
+            'DIARIZATION', 'chunk_duration_s', fallback=300
         )
         self.diarization_chunk_overlap_s = self.config.getint(
             'DIARIZATION', 'chunk_overlap_s', fallback=5
@@ -323,6 +327,25 @@ class Config:
             self.config.get('DIARIZATION', 'use_gpu_if_available', fallback='true')
         )
         self.diarization_use_gpu = use_gpu_str.lower() in ['true', '1', 't']
+        
+        # Optimisations CPU
+        num_threads_str = os.environ.get(
+            'DIARIZATION_NUM_THREADS',
+            self.config.get('DIARIZATION', 'num_threads', fallback='0')
+        )
+        self.diarization_num_threads = int(num_threads_str) if num_threads_str.isdigit() else 0
+        
+        reduce_resolution_str = os.environ.get(
+            'DIARIZATION_REDUCE_RESOLUTION',
+            self.config.get('DIARIZATION', 'reduce_resolution', fallback='false')
+        )
+        self.diarization_reduce_resolution = reduce_resolution_str.lower() in ['true', '1', 't']
+        
+        fast_mode_str = os.environ.get(
+            'DIARIZATION_FAST_MODE',
+            self.config.get('DIARIZATION', 'fast_mode', fallback='false')
+        )
+        self.diarization_fast_mode = fast_mode_str.lower() in ['true', '1', 't']
     
     def reload(self):
         """Recharge la configuration depuis le fichier"""

@@ -1304,6 +1304,25 @@ class DiarizationService:
                 else:
                     device = torch.device('cpu')
                     self.pipeline.to(device)
+                    
+                    # Limiter le nombre de threads PyTorch si configuré (pour réduire CPU)
+                    num_threads = getattr(self.config, 'diarization_num_threads', 0)
+                    if num_threads > 0:
+                        torch.set_num_threads(num_threads)
+                        logger.info(f"⚙️ Diarization: Limited PyTorch to {num_threads} thread(s) for CPU usage control")
+                    else:
+                        # Par défaut, limiter à la moitié des cores disponibles pour laisser de la marge
+                        import os
+                        try:
+                            cpu_count = os.cpu_count() or 4
+                            # Limiter à max 4 threads même si plus de cores disponibles
+                            recommended_threads = min(cpu_count // 2, 4)
+                            if recommended_threads > 0:
+                                torch.set_num_threads(recommended_threads)
+                                logger.info(f"⚙️ Diarization: Auto-limited PyTorch to {recommended_threads} thread(s) for CPU usage control")
+                        except:
+                            pass
+                    
                     if use_gpu:
                         logger.info("⚠️ GPU requested but not available, using CPU")
                     else:
@@ -1343,11 +1362,12 @@ class DiarizationService:
             logger.info(f"🎤 Running diarization on {audio_path.name} (duration: {audio_duration:.1f}s)...")
             
             # Vérifier si on doit utiliser le traitement par chunks
-            chunk_duration = getattr(self.config, 'diarization_chunk_duration_s', 600)
+            # Par défaut, utiliser 300s (5 min) pour réduire la charge CPU au lieu de 600s
+            chunk_duration = getattr(self.config, 'diarization_chunk_duration_s', 300)
             
             if chunk_duration > 0 and audio_duration > chunk_duration:
                 # Traitement par chunks pour les longs fichiers
-                logger.info(f"⚡ Using chunk-based diarization (chunk size: {chunk_duration}s)")
+                logger.info(f"⚡ Using chunk-based diarization (chunk size: {chunk_duration}s) to reduce CPU usage")
                 return self._diarize_in_chunks(audio_path, audio_duration, chunk_duration)
             else:
                 # Traitement normal pour les fichiers courts
