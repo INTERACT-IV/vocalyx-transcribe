@@ -259,6 +259,13 @@ class DiarizationService:
                     def patched_hf_hub_download(repo_id, filename, **kwargs):
                         logger.info(f"🔍 huggingface_hub.hf_hub_download called: repo_id={repo_id}, filename={filename}")
                         
+                        # Si ce n'est PAS un modèle pyannote, laisser passer l'appel original
+                        # (pour permettre Whisper et autres modèles de fonctionner normalement)
+                        if isinstance(repo_id, str) and not repo_id.startswith('pyannote/'):
+                            # Ce n'est pas un modèle pyannote, laisser passer sans modification
+                            logger.debug(f"🔓 Non-pyannote repo {repo_id}, allowing normal download")
+                            return original_hf_hub_download(repo_id, filename, **kwargs)
+                        
                         # Détecter si repo_id est en fait un chemin local (commence par / ou ./)
                         if isinstance(repo_id, str) and (repo_id.startswith('/') or repo_id.startswith('./')):
                             # C'est un chemin local, pas un repo_id HuggingFace
@@ -293,14 +300,14 @@ class DiarizationService:
                                 logger.warning(f"⚠️ Local path not found: {repo_id}")
                                 raise FileNotFoundError(f"Local model file not found: {repo_id}")
                         
-                        # Sinon, traiter comme un repo_id HuggingFace normal
+                        # Traiter comme un repo_id pyannote HuggingFace
                         local_path = _find_local_model_file(repo_id, filename)
                         if local_path:
                             logger.info(f"🔧 Redirecting hf_hub_download {repo_id}/{filename} to local file: {local_path}")
                             return str(local_path)
                         else:
                             logger.warning(f"⚠️ File {filename} not found for {repo_id}")
-                        # Sinon, forcer le mode offline
+                        # Sinon, forcer le mode offline (seulement pour pyannote)
                         kwargs['local_files_only'] = True
                         try:
                             return original_hf_hub_download(repo_id, filename, **kwargs)
@@ -317,11 +324,17 @@ class DiarizationService:
                     
                     def patched_file_download(repo_id, filename, **kwargs):
                         logger.info(f"🔍 huggingface_hub.file_download called: repo_id={repo_id}, filename={filename}")
+                        
+                        # Si ce n'est PAS un modèle pyannote, laisser passer l'appel original
+                        if isinstance(repo_id, str) and not repo_id.startswith('pyannote/'):
+                            logger.debug(f"🔓 Non-pyannote repo {repo_id}, allowing normal download")
+                            return original_file_download(repo_id, filename, **kwargs)
+                        
                         local_path = _find_local_model_file(repo_id, filename)
                         if local_path:
                             logger.info(f"🔧 Redirecting file_download {repo_id}/{filename} to local file: {local_path}")
                             return str(local_path)
-                        # Sinon, forcer le mode offline
+                        # Sinon, forcer le mode offline (seulement pour pyannote)
                         kwargs['local_files_only'] = True
                         try:
                             return original_file_download(repo_id, filename, **kwargs)
@@ -706,7 +719,11 @@ class DiarizationService:
                                                 logger.info(f"🔍 Available files in {model_dir}: {list(model_dir.rglob('*'))}")
                                     else:
                                         logger.warning(f"⚠️ repo_id {repo_id} not in model_mapping: {list(model_mapping.keys())}")
-                                    # Sinon, utiliser la fonction originale mais en mode offline
+                                        # Si ce n'est pas un modèle pyannote, laisser passer normalement
+                                        if not isinstance(repo_id, str) or not repo_id.startswith('pyannote/'):
+                                            logger.debug(f"🔓 Non-pyannote repo {repo_id}, allowing normal download")
+                                            return original_hf_hub_download(repo_id, filename, **kwargs)
+                                    # Sinon, utiliser la fonction originale mais en mode offline (seulement pour pyannote)
                                     kwargs['local_files_only'] = True
                                     try:
                                         return original_hf_hub_download(repo_id, filename, **kwargs)
