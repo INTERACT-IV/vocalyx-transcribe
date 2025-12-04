@@ -110,6 +110,12 @@ def _patch_http_for_offline_module_level():
                         if match:
                             repo_id = match.group(1)
                             filename = match.group(2)
+                            
+                            # Si ce n'est PAS un modèle pyannote, laisser passer l'appel original
+                            if not isinstance(repo_id, str) or not repo_id.startswith('pyannote/'):
+                                logger.debug(f"🔓 [MODULE] Non-pyannote repo {repo_id}, allowing normal request")
+                                return original_handle_request(self, request)
+                            
                             local_path = _find_local_model_file(repo_id, filename)
                             if local_path:
                                     logger.info(f"🔧 [MODULE] Redirecting HTTPTransport {request.method} {url} to local file: {local_path}")
@@ -369,6 +375,12 @@ class DiarizationService:
                         if match:
                             repo_id = match.group(1)
                             filename = match.group(2)
+                            
+                            # Si ce n'est PAS un modèle pyannote, laisser passer l'appel original
+                            if not isinstance(repo_id, str) or not repo_id.startswith('pyannote/'):
+                                logger.debug(f"🔓 Non-pyannote repo {repo_id}, allowing normal request")
+                                return original_client_request(self, method, url, **kwargs)
+                            
                             local_path = _find_local_model_file(repo_id, filename)
                             if local_path:
                                     logger.info(f"🔧 Redirecting httpx.Client.request {method} {url} to local file: {local_path}")
@@ -473,9 +485,14 @@ class DiarizationService:
                             if match:
                                 repo_id = match.group(1)
                                 filename = match.group(2)
-                                if repo_id in model_mapping:
-                                    local_path = PathLib(model_mapping[repo_id]) / filename
-                                    if local_path.exists():
+                                
+                                # Si ce n'est PAS un modèle pyannote, laisser passer l'appel original
+                                if not isinstance(repo_id, str) or not repo_id.startswith('pyannote/'):
+                                    logger.debug(f"🔓 Non-pyannote repo {repo_id}, allowing normal request")
+                                    return await original_async_client_request(self, method, url, **kwargs)
+                                
+                                local_path = _find_local_model_file(repo_id, filename)
+                                if local_path:
                                         logger.info(f"🔧 Redirecting AsyncClient.request {method} {url} to local file: {local_path}")
                                         # Retourner un objet mock async
                                         if method.upper() == 'HEAD':
@@ -544,28 +561,34 @@ class DiarizationService:
                             if match:
                                 repo_id = match.group(1)
                                 filename = match.group(2)
-                                if repo_id in model_mapping:
-                                    local_path = PathLib(model_mapping[repo_id]) / filename
-                                    if local_path.exists():
-                                        logger.info(f"🔧 Redirecting HTTPTransport {request.method} {url} to local file: {local_path}")
-                                        # Créer une réponse mock
-                                        from httpx import Response, Headers
-                                        if request.method.upper() == 'HEAD':
-                                            return Response(
-                                                200,
-                                                headers=Headers({
-                                                    'content-type': 'application/octet-stream',
-                                                    'content-length': str(local_path.stat().st_size)
-                                                })
-                                            )
-                                        else:
-                                            with open(local_path, 'rb') as f:
-                                                content = f.read()
-                                            return Response(
-                                                200,
-                                                headers=Headers({'content-type': 'application/octet-stream'}),
-                                                content=content
-                                            )
+                                
+                                # Si ce n'est PAS un modèle pyannote, laisser passer l'appel original
+                                if not isinstance(repo_id, str) or not repo_id.startswith('pyannote/'):
+                                    logger.debug(f"🔓 Non-pyannote repo {repo_id}, allowing normal request")
+                                    return original_handle_request(self, request)
+                                
+                                # Chercher le fichier local pour les modèles pyannote
+                                local_path = _find_local_model_file(repo_id, filename)
+                                if local_path:
+                                    logger.info(f"🔧 Redirecting HTTPTransport {request.method} {url} to local file: {local_path}")
+                                    # Créer une réponse mock
+                                    from httpx import Response, Headers
+                                    if request.method.upper() == 'HEAD':
+                                        return Response(
+                                            200,
+                                            headers=Headers({
+                                                'content-type': 'application/octet-stream',
+                                                'content-length': str(local_path.stat().st_size)
+                                            })
+                                        )
+                                    else:
+                                        with open(local_path, 'rb') as f:
+                                            content = f.read()
+                                        return Response(
+                                            200,
+                                            headers=Headers({'content-type': 'application/octet-stream'}),
+                                            content=content
+                                        )
                         # Sinon, utiliser la méthode originale
                         return original_handle_request(self, request)
                     
