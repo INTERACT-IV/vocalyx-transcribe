@@ -1,30 +1,17 @@
 """
-vocalyx-transcribe/transcribe/audio_utils.py
+vocalyx-transcribe/audio_utils.py
 Utilitaires pour le traitement audio (adapté pour l'architecture microservices)
 """
 
 import logging
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Optional, Dict
 
 import soundfile as sf
 from pydub import AudioSegment
 from pydub.effects import normalize
-from pydub.silence import detect_nonsilent
 
 logger = logging.getLogger("vocalyx")
-
-def sanitize_filename(filename: str) -> str:
-    """
-    Nettoie le nom de fichier pour éviter les injections.
-    
-    Args:
-        filename: Nom de fichier à nettoyer
-        
-    Returns:
-        str: Nom de fichier sécurisé
-    """
-    return "".join(c for c in filename if c.isalnum() or c in "._-")
 
 def get_audio_duration(file_path: Path) -> float:
     """
@@ -118,42 +105,6 @@ def preprocess_audio(audio_path: Path, preserve_stereo_for_diarization: bool = T
             'stereo': None,
             'is_stereo': False
         }
-
-def detect_speech_segments(
-    audio_path: Path,
-    min_silence_len: int = 500,
-    silence_thresh: int = -40
-) -> List[Tuple[int, int]]:
-    """
-    Détecte les segments de parole (Voice Activity Detection).
-    
-    Args:
-        audio_path: Chemin vers le fichier audio
-        min_silence_len: Durée minimum de silence en ms (default: 500)
-        silence_thresh: Seuil de silence en dB (default: -40)
-        
-    Returns:
-        List[Tuple[int, int]]: Liste de (start_ms, end_ms) des segments avec de la parole
-    """
-    try:
-        audio = AudioSegment.from_file(str(audio_path))
-        
-        speech_segments = detect_nonsilent(
-            audio,
-            min_silence_len=min_silence_len,
-            silence_thresh=silence_thresh
-        )
-        
-        if not speech_segments:
-            # Si aucun segment détecté, retourner l'audio complet
-            return [(0, len(audio))]
-        
-        logger.info(f"🎤 VAD: Detected {len(speech_segments)} speech segments")
-        return speech_segments
-    except Exception as e:
-        logger.warning(f"⚠️ VAD failed, using full audio: {e}")
-        audio = AudioSegment.from_file(str(audio_path))
-        return [(0, len(audio))]
 
 def split_audio_intelligent(
     file_path: Path,
