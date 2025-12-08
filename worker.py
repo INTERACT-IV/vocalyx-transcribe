@@ -483,7 +483,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
                     diarization_segment_paths = [Path(preprocessed.get('stereo'))]
                     diarization_time_offsets = [0.0]  # Pas d'offset nécessaire pour un fichier complet
                 else:
-                    # Pour pyannote ou mono : utiliser les segments (comportement original)
+                    # Pour mono : utiliser les segments (comportement original)
                     logger.info(f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION | Preparing diarization segments...")
                     diarization_segment_paths = segment_paths
                     # Calculer les offsets temporels pour chaque segment

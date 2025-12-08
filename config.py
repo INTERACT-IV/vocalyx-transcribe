@@ -88,21 +88,9 @@ class Config:
         
         config['DIARIZATION'] = {
             'enabled': 'false',
-            'model': 'pyannote/speaker-diarization-3.1',
-            'model_path': '/app/models/transcribe/pyannote-speaker-diarization',
-            'hf_token': '',
-            # Paramètres d'optimisation de performance
-            'min_speakers': '',  # Nombre minimum de locuteurs (vide = auto)
-            'max_speakers': '',  # Nombre maximum de locuteurs (vide = auto)
-            'chunk_duration_s': '300',  # Traitement par chunks (0 = désactivé, 300 = 5min recommandé pour réduire CPU)
-            'chunk_overlap_s': '5',  # Chevauchement entre chunks (secondes)
-            'segmentation_threshold': '0.5',  # Seuil de segmentation (0.0-1.0)
-            'clustering_threshold': '0.7',  # Seuil de clustering (0.0-1.0)
-            'use_gpu_if_available': 'true',  # Utiliser GPU si disponible
-            # Optimisations CPU
-            'num_threads': '0',  # Nombre de threads PyTorch (0 = tous, 2-4 = recommandé pour réduire CPU)
-            'reduce_resolution': 'false',  # Réduire résolution audio (true = 8kHz, plus rapide)
-            'fast_mode': 'false'  # Mode économique (moins de CPU, légèrement moins précis)
+            # Paramètres pour diarisation stéréo (sans modèle ML)
+            'stereo_silence_thresh': '-40',  # Seuil de silence pour la détection de voix (en dB)
+            'stereo_min_speech_ms': '250'  # Durée minimale de parole pour être considérée (en ms)
         }
         
         config['LOGGING'] = {
@@ -277,87 +265,14 @@ class Config:
         )
         self.log_colored = log_colored_str.lower() in ['true', '1', 't']
         
-        # DIARIZATION
+        # DIARIZATION (stéréo uniquement - sans modèle ML)
         diarization_enabled_str = os.environ.get(
             'DIARIZATION_ENABLED',
             self.config.get('DIARIZATION', 'enabled', fallback='false')
         )
         self.diarization_enabled = diarization_enabled_str.lower() in ['true', '1', 't']
         
-        # Type de diarisation: 'pyannote' (ML lourd) ou 'stereo' (séparation de canaux, très rapide)
-        self.diarization_type = os.environ.get(
-            'DIARIZATION_TYPE',
-            self.config.get('DIARIZATION', 'type', fallback='stereo')
-        )
-        if self.diarization_type not in ['pyannote', 'stereo']:
-            logger.warning(f"⚠️ Invalid diarization type '{self.diarization_type}', using 'stereo'")
-            self.diarization_type = 'stereo'
-        
-        self.diarization_model = os.environ.get(
-            'DIARIZATION_MODEL',
-            self.config.get('DIARIZATION', 'model', fallback='pyannote/speaker-diarization-3.1')
-        )
-        self.diarization_model_path = os.environ.get(
-            'DIARIZATION_MODEL_PATH',
-            self.config.get('DIARIZATION', 'model_path', fallback='/app/models/transcribe/pyannote-speaker-diarization')
-        )
-        self.hf_token = os.environ.get(
-            'HF_TOKEN',
-            self.config.get('DIARIZATION', 'hf_token', fallback='')
-        )
-        
-        # Paramètres d'optimisation de la diarization
-        min_speakers_str = os.environ.get(
-            'DIARIZATION_MIN_SPEAKERS',
-            self.config.get('DIARIZATION', 'min_speakers', fallback='')
-        )
-        self.diarization_min_speakers = int(min_speakers_str) if min_speakers_str and min_speakers_str.isdigit() else None
-        
-        max_speakers_str = os.environ.get(
-            'DIARIZATION_MAX_SPEAKERS',
-            self.config.get('DIARIZATION', 'max_speakers', fallback='')
-        )
-        self.diarization_max_speakers = int(max_speakers_str) if max_speakers_str and max_speakers_str.isdigit() else None
-        
-        self.diarization_chunk_duration_s = self.config.getint(
-            'DIARIZATION', 'chunk_duration_s', fallback=300
-        )
-        self.diarization_chunk_overlap_s = self.config.getint(
-            'DIARIZATION', 'chunk_overlap_s', fallback=5
-        )
-        self.diarization_segmentation_threshold = self.config.getfloat(
-            'DIARIZATION', 'segmentation_threshold', fallback=0.5
-        )
-        self.diarization_clustering_threshold = self.config.getfloat(
-            'DIARIZATION', 'clustering_threshold', fallback=0.7
-        )
-        
-        use_gpu_str = os.environ.get(
-            'DIARIZATION_USE_GPU',
-            self.config.get('DIARIZATION', 'use_gpu_if_available', fallback='true')
-        )
-        self.diarization_use_gpu = use_gpu_str.lower() in ['true', '1', 't']
-        
-        # Optimisations CPU
-        num_threads_str = os.environ.get(
-            'DIARIZATION_NUM_THREADS',
-            self.config.get('DIARIZATION', 'num_threads', fallback='0')
-        )
-        self.diarization_num_threads = int(num_threads_str) if num_threads_str.isdigit() else 0
-        
-        reduce_resolution_str = os.environ.get(
-            'DIARIZATION_REDUCE_RESOLUTION',
-            self.config.get('DIARIZATION', 'reduce_resolution', fallback='false')
-        )
-        self.diarization_reduce_resolution = reduce_resolution_str.lower() in ['true', '1', 't']
-        
-        fast_mode_str = os.environ.get(
-            'DIARIZATION_FAST_MODE',
-            self.config.get('DIARIZATION', 'fast_mode', fallback='false')
-        )
-        self.diarization_fast_mode = fast_mode_str.lower() in ['true', '1', 't']
-        
-        # Paramètres pour diarisation stéréo (légère et rapide)
+        # Paramètres pour diarisation stéréo (légère et rapide, sans modèle ML)
         silence_thresh_str = os.environ.get(
             'STEREO_DIARIZATION_SILENCE_THRESH',
             self.config.get('DIARIZATION', 'stereo_silence_thresh', fallback='-40')

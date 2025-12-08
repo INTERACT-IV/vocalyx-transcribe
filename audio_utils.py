@@ -96,7 +96,6 @@ def preprocess_audio(audio_path: Path, preserve_stereo_for_diarization: bool = T
         # Version stéréo pour diarisation (si stéréo détecté et préservation demandée)
         if is_stereo and preserve_stereo_for_diarization:
             # Préserver le stéréo avec normalisation mais sans conversion de sample rate
-            # pyannote.audio peut gérer différents sample rates
             audio_stereo = audio.set_frame_rate(16000)  # 16kHz mais stéréo préservé
             stereo_path = audio_path.parent / f"{audio_path.stem}_processed_stereo.wav"
             audio_stereo.export(str(stereo_path), format="wav")

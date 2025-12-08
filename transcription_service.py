@@ -11,7 +11,6 @@ from typing import Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from faster_whisper import WhisperModel
 from audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
-from diarization import DiarizationService
 from stereo_diarization import StereoDiarizationService
 
 # Imports non utilisés (TimeoutError, signal, contextmanager) supprimés
@@ -77,27 +76,15 @@ class TranscriptionService:
         logger.info(f"⚙️ VAD: {self.config.vad_enabled} | Beam size: {self.config.beam_size} | Best of: {best_of}")
     
     def _load_diarization_service(self):
-        """Charge le service de diarisation (seulement si nécessaire)"""
+        """Charge le service de diarisation stéréo (seulement si nécessaire)"""
         if self.diarization_service is not None:
             return  # Déjà chargé
         
         try:
-            # Déterminer le type de diarisation à utiliser
-            diarization_type = getattr(self.config, 'diarization_type', 'stereo')
-            
-            if diarization_type == 'stereo':
-                # Utiliser la diarisation stéréo (légère et rapide)
-                logger.info("🎯 Using stereo diarization (lightweight, no ML models)")
-                self.diarization_service = StereoDiarizationService(self.config)
-                logger.info("✅ Stereo diarization service initialized and ready")
-            else:
-                # Utiliser pyannote.audio (ML lourd mais plus flexible)
-                logger.info("🎯 Using pyannote diarization (ML-based)")
-                self.diarization_service = DiarizationService(self.config)
-                if self.diarization_service.pipeline is None:
-                    logger.info("ℹ️ Diarization service initialized but model not available (will be skipped if requested)")
-                else:
-                    logger.info("✅ Diarization service initialized and ready")
+            # Utiliser uniquement la diarisation stéréo (légère et rapide, sans modèle ML)
+            logger.info("🎯 Using stereo diarization (lightweight, no ML models)")
+            self.diarization_service = StereoDiarizationService(self.config)
+            logger.info("✅ Stereo diarization service initialized and ready")
         except Exception as e:
             logger.warning(f"⚠️ Failed to initialize diarization service: {e} (will be skipped if requested)")
             self.diarization_service = None
@@ -421,9 +408,9 @@ class TranscriptionService:
                 full_text = text
                 language_detected = lang
             
-            # 5. Diarisation (si activée pour cette transcription)
+            # 5. Diarisation stéréo (si activée pour cette transcription)
             if use_diarization:
-                if self.diarization_service and self.diarization_service.pipeline:
+                if self.diarization_service:
                     logger.info(f"{log_prefix}🎤 Running speaker diarization...")
                     try:
                         # Utiliser la version stéréo pour la diarisation si disponible (optimal pour séparation des locuteurs)
@@ -449,7 +436,7 @@ class TranscriptionService:
                         logger.error(f"{log_prefix}❌ Error during diarization: {e}", exc_info=True)
                         # Continuer sans diarisation en cas d'erreur
                 else:
-                    logger.warning(f"{log_prefix}⚠️ Diarization requested but service not available (check model configuration)")
+                    logger.warning(f"{log_prefix}⚠️ Diarization requested but service not available")
             
             processing_time = round(time.time() - start_time, 2)
             speed_ratio = round(original_duration / processing_time, 2) if processing_time > 0 else 0

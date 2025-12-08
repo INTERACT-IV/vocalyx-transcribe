@@ -15,10 +15,7 @@ av==16.0.1
 soundfile==0.13.1
 pydub==0.25.1
 
-# Diarisation (optionnel - nécessite torch CPU-only)
---extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.0.0
-pyannote.audio>=3.1.0
+# Diarisation stéréo (légère, sans modèle ML - utilise uniquement pydub)
 
 # Utilitaires
 python-dotenv==1.2.1
