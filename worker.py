@@ -969,11 +969,12 @@ def aggregate_segments_task(self, transcription_id: str):
             f"Real elapsed time: {real_elapsed_time:.1f}s"
         )
         
-        # Trier les segments par timestamp (au cas où ils arrivent dans le désordre)
-        # Tri par start, puis par end pour gérer les chevauchements de manière cohérente
-        all_segments.sort(key=lambda x: (x['start'], x['end']))
+        # Trier les segments par timestamp de début (ordre chronologique)
+        # ⚠️ IMPORTANT: Utiliser uniquement 'start' pour garantir l'ordre chronologique correct
+        # Le tri par (start, end) peut causer des problèmes avec les segments qui se chevauchent
+        all_segments.sort(key=lambda x: x['start'])
         logger.info(
-            f"[{transcription_id}] 🔄 DISTRIBUTED AGGREGATION | Step 2/3: Segments sorted by timestamp | "
+            f"[{transcription_id}] 🔄 DISTRIBUTED AGGREGATION | Step 2/3: Segments sorted by start timestamp | "
             f"Total segments: {len(all_segments)}"
         )
         
@@ -1019,6 +1020,8 @@ def aggregate_segments_task(self, transcription_id: str):
                                     all_segments,
                                     merged_diarization_segments
                                 )
+                                # Re-trier après l'assignation des speakers pour garantir l'ordre chronologique
+                                all_segments.sort(key=lambda x: x['start'])
                                 logger.info(f"[{transcription_id}] ✅ DISTRIBUTED DIARIZATION | Completed and assigned to segments")
                             else:
                                 logger.warning(f"[{transcription_id}] ⚠️ Diarization service not available after loading")
@@ -1047,6 +1050,8 @@ def aggregate_segments_task(self, transcription_id: str):
                                     all_segments,
                                     diarization_segments
                                 )
+                                # Re-trier après l'assignation des speakers pour garantir l'ordre chronologique
+                                all_segments.sort(key=lambda x: x['start'])
                                 logger.info(f"[{transcription_id}] ✅ Diarization completed and assigned to segments")
                             else:
                                 logger.warning(f"[{transcription_id}] ⚠️ Diarization returned no segments")

@@ -1575,8 +1575,9 @@ class DiarizationService:
         if not segments:
             return segments
         
-        # Trier par timestamp
-        segments = sorted(segments, key=lambda x: (x['start'], x['end']))
+        # Trier par timestamp de début (ordre chronologique)
+        # ⚠️ IMPORTANT: Utiliser uniquement 'start' pour garantir l'ordre chronologique correct
+        segments = sorted(segments, key=lambda x: x['start'])
         merged = []
         
         for current in segments:
