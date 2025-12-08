@@ -919,6 +919,15 @@ def aggregate_segments_task(self, transcription_id: str):
     )
     start_time = time.time()
     
+    def get_segment_order_key(seg):
+        """Calcule une clé d'ordre basée sur le point médian du segment pour gérer les chevauchements"""
+        start = seg.get('start', 0)
+        end = seg.get('end', start)
+        # Utiliser le point médian pour les segments qui se chevauchent
+        # Si deux segments ont le même point médian, utiliser start comme tie-breaker
+        midpoint = (start + end) / 2.0
+        return (midpoint, start)
+    
     try:
         redis_manager = get_redis_manager()
         metadata = redis_manager.get_metadata(transcription_id)
@@ -969,12 +978,12 @@ def aggregate_segments_task(self, transcription_id: str):
             f"Real elapsed time: {real_elapsed_time:.1f}s"
         )
         
-        # Trier les segments par timestamp de début (ordre chronologique)
-        # ⚠️ IMPORTANT: Utiliser uniquement 'start' pour garantir l'ordre chronologique correct
-        # Le tri par (start, end) peut causer des problèmes avec les segments qui se chevauchent
-        all_segments.sort(key=lambda x: x['start'])
+        # Trier les segments par point médian pour gérer les chevauchements
+        # ⚠️ IMPORTANT: Utiliser le point médian (start + end) / 2 pour garantir l'ordre chronologique correct
+        # quand les segments se chevauchent. Le tri par start seul peut causer des problèmes.
+        all_segments.sort(key=get_segment_order_key)
         logger.info(
-            f"[{transcription_id}] 🔄 DISTRIBUTED AGGREGATION | Step 2/3: Segments sorted by start timestamp | "
+            f"[{transcription_id}] 🔄 DISTRIBUTED AGGREGATION | Step 2/3: Segments sorted by midpoint | "
             f"Total segments: {len(all_segments)}"
         )
         
@@ -1021,7 +1030,7 @@ def aggregate_segments_task(self, transcription_id: str):
                                     merged_diarization_segments
                                 )
                                 # Re-trier après l'assignation des speakers pour garantir l'ordre chronologique
-                                all_segments.sort(key=lambda x: x['start'])
+                                all_segments.sort(key=get_segment_order_key)
                                 logger.info(f"[{transcription_id}] ✅ DISTRIBUTED DIARIZATION | Completed and assigned to segments")
                             else:
                                 logger.warning(f"[{transcription_id}] ⚠️ Diarization service not available after loading")
@@ -1051,7 +1060,7 @@ def aggregate_segments_task(self, transcription_id: str):
                                     diarization_segments
                                 )
                                 # Re-trier après l'assignation des speakers pour garantir l'ordre chronologique
-                                all_segments.sort(key=lambda x: x['start'])
+                                all_segments.sort(key=get_segment_order_key)
                                 logger.info(f"[{transcription_id}] ✅ Diarization completed and assigned to segments")
                             else:
                                 logger.warning(f"[{transcription_id}] ⚠️ Diarization returned no segments")
@@ -1065,6 +1074,11 @@ def aggregate_segments_task(self, transcription_id: str):
         # ⚠️ IMPORTANT : Reconstruire le texte final APRÈS toutes les modifications (tri + diarisation)
         # pour garantir que le texte correspond exactement à l'ordre chronologique des segments
         # et que chaque segment avec son texte est pris en compte dans l'ordre correct
+        
+        # Re-trier avec la clé de point médian pour gérer les chevauchements (au cas où la diarisation aurait modifié l'ordre)
+        all_segments.sort(key=get_segment_order_key)
+        
+        # Construire le texte final en joignant les segments dans l'ordre chronologique
         full_text = " ".join(seg.get('text', '') for seg in all_segments if seg.get('text', '').strip())
         
         # Sauvegarder le résultat final
