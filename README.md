@@ -4,7 +4,7 @@ Workers Celery pour la transcription audio avec Whisper et la diarisation des lo
 
 ## Description
 
-Module worker de Vocalyx exécutant les tâches de transcription audio de manière distribuée. Utilise Whisper (OpenAI) pour la transcription et Pyannote pour la diarisation des locuteurs. Implémente un cache de modèles pour optimiser les performances.
+Module worker de Vocalyx exécutant les tâches de transcription audio de manière distribuée. Utilise Whisper (OpenAI) pour la transcription et la diarisation stéréo (sans modèle ML) pour l'identification des locuteurs. Implémente un cache de modèles pour optimiser les performances.
 
 ## Architecture
 
@@ -15,7 +15,7 @@ vocalyx-transcribe/
 ├── worker.py                    # Point d'entrée Celery
 ├── transcription_service.py     # Service de transcription Whisper
 ├── audio_utils.py               # Utilitaires de traitement audio
-├── diarization.py               # Service de diarisation Pyannote
+├── stereo_diarization.py        # Service de diarisation stéréo (sans modèle ML)
 ├── application/
 │   └── services/
 │       └── transcription_worker_service.py  # Service métier
@@ -41,12 +41,6 @@ Système de files d'attente distribuées pour l'exécution asynchrone de tâches
 
 ### faster-whisper
 Implémentation optimisée de Whisper utilisant CTranslate2. Fournit des performances améliorées par rapport à l'implémentation originale OpenAI.
-
-### PyTorch
-Framework de deep learning pour Pyannote. Utilisé pour la diarisation des locuteurs et la segmentation audio.
-
-### pyannote.audio
-Bibliothèque Python pour la diarisation des locuteurs. Identifie et sépare les différents locuteurs dans un enregistrement audio.
 
 ### soundfile / pydub
 Bibliothèques de traitement audio. `soundfile` pour la lecture/écriture de fichiers audio, `pydub` pour les opérations de manipulation audio.
@@ -134,13 +128,12 @@ Système de cache LRU pour les modèles Whisper :
 
 ## Diarisation
 
-Service optionnel utilisant Pyannote pour :
+Service optionnel utilisant la diarisation stéréo (sans modèle ML) pour :
 
-- **Identification des locuteurs** : Détection du nombre de locuteurs
-- **Segmentation temporelle** : Attribution des segments aux locuteurs
-- **Optimisation stéréo** : Utilisation optimale des canaux stéréo
-
-Nécessite les modèles Pyannote dans `shared/models/`.
+- **Identification des locuteurs** : Séparation par canaux stéréo (gauche = SPEAKER_00, droit = SPEAKER_01)
+- **Segmentation temporelle** : Attribution des segments aux locuteurs basée sur la détection de voix par canal
+- **Performance** : Très rapide (quelques secondes) car aucun modèle ML requis
+- **Requis** : Fichiers audio en stéréo avec un canal par locuteur
 
 ## Monitoring
 

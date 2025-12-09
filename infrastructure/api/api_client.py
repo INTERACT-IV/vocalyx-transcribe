@@ -6,7 +6,7 @@ import logging
 from typing import Dict, Optional
 import httpx
 
-logger = logging.getLogger("vocalyx")
+logger = logging.getLogger("vocalyx.transcribe")
 
 
 class VocalyxAPIClient:

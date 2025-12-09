@@ -1149,7 +1149,7 @@ def aggregate_segments_task(self, transcription_id: str):
                         else:
                             logger.warning(f"[{transcription_id}] ⚠️ Diarization audio file not found: {diarization_audio_path}")
                     else:
-                        logger.warning(f"[{transcription_id}] ⚠️ Diarization requested but service not available (check model configuration)")
+                        logger.warning(f"[{transcription_id}] ⚠️ Diarization requested but service not available (check diarization configuration)")
             except Exception as e:
                 logger.error(f"[{transcription_id}] ❌ Diarization error: {e}", exc_info=True)
         
