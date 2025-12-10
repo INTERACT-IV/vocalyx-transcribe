@@ -928,20 +928,22 @@ def aggregate_segments_task(self, transcription_id: str):
         midpoint = (start + end) / 2.0
         return (midpoint, start)
     
-    def filter_overlapping_segments(segments, early_segment_threshold=1.0, overlap_threshold=0.6):
+    def filter_overlapping_segments(segments, early_segment_threshold=2.0, overlap_threshold=0.5, start_window=0.5):
         """
-        Filtre uniquement les segments qui commencent très tôt (artefacts du début) 
-        et qui se chevauchent significativement avec des segments qui commencent plus tard.
+        Filtre les segments qui commencent très tôt (artefacts du début) 
+        et qui se chevauchent significativement avec d'autres segments.
         
-        Cette approche est moins agressive et préserve la plupart des segments,
-        en ne supprimant que les artefacts évidents du début de l'audio.
+        Amélioration : Compare tous les segments entre eux, pas seulement early vs later,
+        pour mieux détecter les artefacts qui commencent presque en même temps.
         
         Args:
             segments: Liste de segments
             early_segment_threshold: Seuil en secondes. Les segments qui commencent avant ce seuil
                                     sont considérés comme "début" et peuvent être filtrés.
-            overlap_threshold: Seuil de chevauchement (0.0-1.0). Un segment du début est supprimé
-                              s'il se chevauche à plus de ce seuil avec un segment qui commence plus tard.
+            overlap_threshold: Seuil de chevauchement (0.0-1.0). Un segment est supprimé
+                              s'il se chevauche à plus de ce seuil avec un autre segment.
+            start_window: Fenêtre temporelle en secondes. Les segments qui commencent dans cette
+                          fenêtre sont comparés entre eux pour détecter les doublons.
         
         Returns:
             Liste de segments filtrés
@@ -951,15 +953,16 @@ def aggregate_segments_task(self, transcription_id: str):
         
         # Trier par start
         sorted_segments = sorted(segments, key=lambda x: x.get('start', 0))
-        filtered = []
-        early_segments_to_remove = []
+        segments_to_remove = []
         
-        # Identifier les segments qui commencent très tôt
+        # Identifier les segments qui commencent très tôt (candidats pour être des artefacts)
         early_segments = [seg for seg in sorted_segments if seg.get('start', 0) < early_segment_threshold]
-        later_segments = [seg for seg in sorted_segments if seg.get('start', 0) >= early_segment_threshold]
         
-        # Pour chaque segment du début, vérifier s'il se chevauche beaucoup avec un segment plus tard
-        for early_seg in early_segments:
+        # Pour chaque segment du début, comparer avec tous les autres segments
+        for i, early_seg in enumerate(early_segments):
+            if early_seg in segments_to_remove:
+                continue
+                
             early_start = early_seg.get('start', 0)
             early_end = early_seg.get('end', early_start)
             early_duration = early_end - early_start
@@ -967,18 +970,21 @@ def aggregate_segments_task(self, transcription_id: str):
             if early_duration <= 0:
                 continue
             
-            # Vérifier le chevauchement avec les segments qui commencent plus tard
-            for later_seg in later_segments:
-                later_start = later_seg.get('start', 0)
-                later_end = later_seg.get('end', later_start)
-                later_duration = later_end - later_start
+            # Comparer avec tous les autres segments (y compris ceux qui commencent aussi tôt)
+            for j, other_seg in enumerate(sorted_segments):
+                if i == j or other_seg in segments_to_remove:
+                    continue
+                    
+                other_start = other_seg.get('start', 0)
+                other_end = other_seg.get('end', other_start)
+                other_duration = other_end - other_start
                 
-                if later_duration <= 0:
+                if other_duration <= 0:
                     continue
                 
                 # Calculer le chevauchement
-                overlap_start = max(early_start, later_start)
-                overlap_end = min(early_end, later_end)
+                overlap_start = max(early_start, other_start)
+                overlap_end = min(early_end, other_end)
                 overlap_duration = max(0, overlap_end - overlap_start)
                 
                 if overlap_duration <= 0:
@@ -987,14 +993,36 @@ def aggregate_segments_task(self, transcription_id: str):
                 # Calculer le ratio de chevauchement par rapport au segment du début
                 overlap_ratio = overlap_duration / early_duration if early_duration > 0 else 0
                 
-                # Si le segment du début se chevauche beaucoup avec un segment plus tard,
-                # c'est probablement un artefact, on le supprime
-                if overlap_ratio >= overlap_threshold:
-                    early_segments_to_remove.append(early_seg)
-                    break  # Un seul chevauchement suffit pour supprimer le segment du début
+                # Si les deux segments commencent dans une fenêtre très courte (artefacts du début)
+                # et se chevauchent significativement, supprimer celui qui commence le plus tôt
+                # ou celui qui est le plus court
+                start_diff = abs(early_start - other_start)
+                
+                if start_diff <= start_window and overlap_ratio >= overlap_threshold:
+                    # Décider lequel supprimer : celui qui commence le plus tôt, ou le plus court si même start
+                    if early_start < other_start:
+                        # Le segment early commence plus tôt, le supprimer
+                        segments_to_remove.append(early_seg)
+                        break
+                    elif early_start == other_start:
+                        # Même start : supprimer le plus court
+                        if early_duration < other_duration:
+                            segments_to_remove.append(early_seg)
+                            break
+                        elif early_duration == other_duration:
+                            # Même durée : supprimer celui qui se termine le plus tôt (artefact probable)
+                            if early_end < other_end:
+                                segments_to_remove.append(early_seg)
+                                break
+                elif overlap_ratio >= overlap_threshold:
+                    # Chevauchement significatif même si pas dans la fenêtre de début
+                    # Supprimer celui qui commence le plus tôt
+                    if early_start < other_start:
+                        segments_to_remove.append(early_seg)
+                        break
         
         # Filtrer : garder tous les segments sauf ceux identifiés comme artefacts
-        filtered = [seg for seg in sorted_segments if seg not in early_segments_to_remove]
+        filtered = [seg for seg in sorted_segments if seg not in segments_to_remove]
         
         return filtered
     
@@ -1048,11 +1076,11 @@ def aggregate_segments_task(self, transcription_id: str):
             f"Real elapsed time: {real_elapsed_time:.1f}s"
         )
         
-        # Filtrer uniquement les segments qui commencent très tôt (artefacts du début)
-        # et qui se chevauchent significativement avec des segments plus tardifs
-        # Cette approche préserve la plupart des segments et ne supprime que les artefacts évidents
+        # Filtrer les segments qui commencent très tôt (artefacts du début)
+        # et qui se chevauchent significativement avec d'autres segments
+        # Cette approche compare tous les segments entre eux pour mieux détecter les doublons
         original_count = len(all_segments)
-        all_segments = filter_overlapping_segments(all_segments, early_segment_threshold=1.0, overlap_threshold=0.6)
+        all_segments = filter_overlapping_segments(all_segments, early_segment_threshold=2.0, overlap_threshold=0.5, start_window=0.5)
         filtered_count = len(all_segments)
         if original_count != filtered_count:
             logger.info(
