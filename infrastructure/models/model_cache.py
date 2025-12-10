@@ -69,11 +69,12 @@ class ModelCache:
         elif model_name.startswith('./') or model_name.startswith('/'):
             parts = model_name.replace('\\', '/').split('/')
             for part in reversed(parts):
-                if part in ['tiny', 'base', 'small', 'medium', 'large']:
+                if part in ['tiny', 'base', 'small', 'medium', 'large', 'large-v3-turbo']:
                     return part
             return 'small'
         
-        return model_name if model_name in ['tiny', 'base', 'small', 'medium', 'large'] else 'small'
+        valid_models = ['tiny', 'base', 'small', 'medium', 'large', 'large-v3-turbo']
+        return model_name if model_name in valid_models else 'small'
     
     def _evict_lru(self):
         """Supprime le modèle le moins récemment utilisé"""

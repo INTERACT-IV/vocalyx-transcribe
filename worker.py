@@ -109,7 +109,7 @@ def get_transcription_service(model_name: str = 'small'):
     Charge le service de transcription avec cache par modèle.
     
     Args:
-        model_name: Nom du modèle Whisper (tiny, base, small, medium, large) ou chemin
+        model_name: Nom du modèle Whisper (tiny, base, small, medium, large-v3-turbo) ou chemin
         
     Returns:
         TranscriptionService: Service de transcription avec le modèle demandé

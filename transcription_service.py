@@ -29,7 +29,7 @@ class TranscriptionService:
         
         Args:
             config: Configuration du worker
-            model_name: Nom du modèle Whisper à utiliser (tiny, base, small, medium, large).
+            model_name: Nom du modèle Whisper à utiliser (tiny, base, small, medium, large-v3-turbo).
                        Si None, utilise le modèle de la config.
         """
         self.config = config
@@ -45,9 +45,13 @@ class TranscriptionService:
         # Construire le chemin du modèle si c'est un nom simple (tiny, base, etc.)
         model_path = self.model_name
         
-        # Si c'est un nom simple (tiny, base, small, medium), construire le chemin
-        if model_path in ["tiny", "base", "small", "medium", "large"]:
-            model_path = f"./models/transcribe/openai-whisper-{self.model_name}"
+        # Si c'est un nom simple (tiny, base, small, medium, large-v3-turbo), construire le chemin
+        if model_path in ["tiny", "base", "small", "medium", "large", "large-v3-turbo"]:
+            # Pour large-v3-turbo, utiliser le nom complet
+            if model_path == "large-v3-turbo":
+                model_path = f"./models/transcribe/openai-whisper-large-v3-turbo"
+            else:
+                model_path = f"./models/transcribe/openai-whisper-{self.model_name}"
         
         # Convertir les chemins relatifs en chemins absolus
         # faster-whisper interprète les chemins relatifs comme des repo_id HuggingFace
