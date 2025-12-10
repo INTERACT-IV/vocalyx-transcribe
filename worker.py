@@ -438,13 +438,13 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         })
         
         # 1. Pré-traiter l'audio
-        logger.info(f"[{transcription_id}] 🔧 DISTRIBUTED ORCHESTRATION | Step 1/4: Preprocessing audio...")
+        logger.info(f"[{transcription_id}] 🔧 DISTRIBUTED ORCHESTRATION | Step 1/6: Preprocessing audio...")
         preprocessed = preprocess_audio(file_path_obj, preserve_stereo_for_diarization=transcription.get('diarization_enabled', False))
         processed_path_mono = preprocessed['mono']
         
         # 2. Découper en segments (forcer la découpe car on est en mode distribué)
         logger.info(
-            f"[{transcription_id}] ✂️ DISTRIBUTED ORCHESTRATION | Step 2/4: Splitting audio into segments | "
+            f"[{transcription_id}] ✂️ DISTRIBUTED ORCHESTRATION | Step 2/6: Splitting audio into segments | "
             f"VAD: {use_vad} | Segment length: {config.segment_length_ms}ms | "
             f"Force split: True (distributed mode)"
         )
@@ -457,7 +457,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         
         num_segments = len(segment_paths)
         logger.info(
-            f"[{transcription_id}] ✅ DISTRIBUTED ORCHESTRATION | Step 2/4: Segmentation complete | "
+            f"[{transcription_id}] ✅ DISTRIBUTED ORCHESTRATION | Step 2/6: Segmentation complete | "
             f"Segments created: {num_segments} | "
             f"Will be distributed across available workers"
         )
@@ -465,7 +465,29 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         if num_segments == 0:
             raise ValueError("No segments created")
         
-        # 3. Préparer la diarisation distribuée si demandée
+        # 3. Calculer les offsets temporels réels pour chaque segment de transcription
+        # Ces offsets seront utilisés pour ajuster les timestamps des segments transcrits
+        transcription_time_offsets = []
+        current_offset = 0.0
+        for i, seg_path in enumerate(segment_paths):
+            transcription_time_offsets.append(current_offset)
+            # Calculer la durée réelle du segment audio
+            try:
+                import soundfile as sf
+                seg_duration = sf.info(str(seg_path)).duration
+                current_offset += seg_duration
+            except Exception as e:
+                # Fallback : utiliser la durée moyenne estimée
+                logger.warning(f"[{transcription_id}] ⚠️ Could not get segment {i} duration: {e}, using estimated duration")
+                estimated_duration = get_audio_duration(file_path_obj) / num_segments
+                current_offset += estimated_duration
+        
+        logger.info(
+            f"[{transcription_id}] ⏱️ DISTRIBUTED ORCHESTRATION | Calculated time offsets for {num_segments} segments | "
+            f"Total duration: {current_offset:.2f}s"
+        )
+        
+        # 4. Préparer la diarisation distribuée si demandée
         use_diarization = transcription.get('diarization_enabled', False)
         diarization_segment_paths = []
         diarization_time_offsets = []
@@ -501,7 +523,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
                             current_offset += estimated_duration
                 logger.info(f"[{transcription_id}] 🎤 DISTRIBUTED DIARIZATION | Prepared {len(diarization_segment_paths)} segment(s) for diarization")
         
-        # 4. Stocker les métadonnées dans Redis
+        # 5. Stocker les métadonnées dans Redis
         redis_manager = get_redis_manager()
         orchestration_start_time = time.time()
         
@@ -510,6 +532,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             "total_segments": num_segments,
             "completed_segments": 0,
             "segment_paths": [str(p) for p in segment_paths],
+            "transcription_time_offsets": transcription_time_offsets,  # Offsets temporels réels pour chaque segment
             "use_vad": use_vad,
             "use_diarization": use_diarization,
             "whisper_model": whisper_model,
@@ -534,9 +557,9 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             redis_client.set(diarization_counter_key, 0)
             redis_client.expire(diarization_counter_key, 3600)
         
-        # 5. Créer une tâche pour chaque segment de transcription
+        # 6. Créer une tâche pour chaque segment de transcription
         logger.info(
-            f"[{transcription_id}] 📤 DISTRIBUTED ORCHESTRATION | Step 3/5: Creating transcription segment tasks | "
+            f"[{transcription_id}] 📤 DISTRIBUTED ORCHESTRATION | Step 3/6: Creating transcription segment tasks | "
             f"Total segments: {num_segments} | "
             f"Queue: transcription | "
             f"Tasks will be distributed automatically by Celery"
@@ -558,11 +581,11 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
                 f"Waiting for available worker..."
             )
         
-        # 6. Créer des tâches de diarisation distribuée si demandée
+        # 7. Créer des tâches de diarisation distribuée si demandée
         diarization_tasks = []
         if use_diarization and diarization_segment_paths:
             logger.info(
-                f"[{transcription_id}] 🎤 DISTRIBUTED ORCHESTRATION | Step 4/5: Creating diarization segment tasks | "
+                f"[{transcription_id}] 🎤 DISTRIBUTED ORCHESTRATION | Step 4/6: Creating diarization segment tasks | "
                 f"Total segments: {len(diarization_segment_paths)} | "
                 f"Queue: transcription | "
                 f"Tasks will be distributed automatically by Celery"
@@ -581,7 +604,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
                     f"File: {Path(diarization_seg_path).name}"
                 )
         
-        # 7. Stocker les IDs des tâches
+        # 8. Stocker les IDs des tâches
         redis_client = get_redis_client()
         tasks_key = f"transcription:{transcription_id}:segment_tasks"
         redis_client.setex(tasks_key, 3600, json.dumps(segment_tasks))
@@ -591,7 +614,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             redis_client.setex(diarization_tasks_key, 3600, json.dumps(diarization_tasks))
         
         logger.info(
-            f"[{transcription_id}] ✅ DISTRIBUTED ORCHESTRATION | Step 5/5: All tasks created | "
+            f"[{transcription_id}] ✅ DISTRIBUTED ORCHESTRATION | Step 6/6: All tasks created | "
             f"Transcription tasks: {num_segments} | "
             f"Diarization tasks: {len(diarization_tasks) if use_diarization else 0} | "
             f"Next: Workers will process segments in parallel"
@@ -674,17 +697,33 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
         processing_time = round(time.time() - start_time, 2)
         
-        # Calculer l'offset temporel pour ce segment
-        time_offset = 0.0
-        if segment_index > 0:
-            for prev_idx in range(segment_index):
-                prev_result = redis_manager.get_segment_result(transcription_id, prev_idx)
-                if prev_result and prev_result.get('segments'):
-                    last_segment = prev_result['segments'][-1]
-                    time_offset = last_segment.get('end', 0.0)
-                    break
+        # Récupérer l'offset temporel réel depuis les métadonnées
+        # Cet offset correspond à la position réelle du segment dans l'audio complet
+        transcription_time_offsets = metadata.get('transcription_time_offsets', [])
+        if segment_index < len(transcription_time_offsets):
+            time_offset = transcription_time_offsets[segment_index]
+        else:
+            # Fallback : calculer l'offset à partir des segments précédents (ancienne méthode)
+            logger.warning(
+                f"[{transcription_id}] ⚠️ DISTRIBUTED SEGMENT | "
+                f"Time offset not found in metadata for segment {segment_index}, using fallback calculation"
+            )
+            time_offset = 0.0
+            if segment_index > 0:
+                for prev_idx in range(segment_index):
+                    prev_result = redis_manager.get_segment_result(transcription_id, prev_idx)
+                    if prev_result and prev_result.get('segments'):
+                        last_segment = prev_result['segments'][-1]
+                        time_offset = last_segment.get('end', 0.0)
+                        break
         
-        # Ajuster les timestamps avec l'offset
+        logger.debug(
+            f"[{transcription_id}] ⏱️ DISTRIBUTED SEGMENT | "
+            f"Segment {segment_index+1}/{total_segments} | "
+            f"Time offset: {time_offset:.2f}s"
+        )
+        
+        # Ajuster les timestamps avec l'offset réel
         adjusted_segments = []
         for seg in segments_list:
             adjusted_segments.append({
@@ -920,13 +959,16 @@ def aggregate_segments_task(self, transcription_id: str):
     start_time = time.time()
     
     def get_segment_order_key(seg):
-        """Calcule une clé d'ordre basée sur le point médian du segment pour gérer les chevauchements"""
+        """
+        Calcule une clé d'ordre pour garantir un ordre chronologique correct.
+        Utilise start comme critère principal, puis end comme tie-breaker.
+        Cela garantit un ordre stable même avec des chevauchements.
+        """
         start = seg.get('start', 0)
         end = seg.get('end', start)
-        # Utiliser le point médian pour les segments qui se chevauchent
-        # Si deux segments ont le même point médian, utiliser start comme tie-breaker
-        midpoint = (start + end) / 2.0
-        return (midpoint, start)
+        # Utiliser start comme critère principal, puis end comme tie-breaker
+        # Cela garantit un ordre chronologique correct même avec des chevauchements
+        return (start, end)
     
     def filter_overlapping_segments(segments, early_segment_threshold=2.0, overlap_threshold=0.5, start_window=0.5):
         """
@@ -1088,12 +1130,12 @@ def aggregate_segments_task(self, transcription_id: str):
                 f"Before: {original_count} | After: {filtered_count} | Removed: {original_count - filtered_count}"
             )
         
-        # Trier les segments par point médian pour gérer les chevauchements restants
-        # ⚠️ IMPORTANT: Utiliser le point médian (start + end) / 2 pour garantir l'ordre chronologique correct
-        # quand les segments se chevauchent. Le tri par start seul peut causer des problèmes.
+        # Trier les segments par ordre chronologique (start, puis end)
+        # ⚠️ IMPORTANT: Utiliser start comme critère principal garantit un ordre chronologique correct
+        # même avec des chevauchements. Le tri par start/end est plus fiable que le point médian.
         all_segments.sort(key=get_segment_order_key)
         logger.info(
-            f"[{transcription_id}] 🔄 DISTRIBUTED AGGREGATION | Step 2/3: Segments sorted by midpoint | "
+            f"[{transcription_id}] 🔄 DISTRIBUTED AGGREGATION | Step 2/3: Segments sorted chronologically (start, end) | "
             f"Total segments: {len(all_segments)}"
         )
         
@@ -1141,7 +1183,7 @@ def aggregate_segments_task(self, transcription_id: str):
                                 )
                                 # Re-trier après l'assignation des speakers pour garantir l'ordre chronologique
                                 all_segments.sort(key=get_segment_order_key)
-                                logger.info(f"[{transcription_id}] ✅ DISTRIBUTED DIARIZATION | Completed and assigned to segments")
+                                logger.info(f"[{transcription_id}] ✅ DISTRIBUTED DIARIZATION | Completed and assigned to segments | Re-sorted chronologically")
                             else:
                                 logger.warning(f"[{transcription_id}] ⚠️ Diarization service not available after loading")
                         else:
@@ -1171,7 +1213,7 @@ def aggregate_segments_task(self, transcription_id: str):
                                 )
                                 # Re-trier après l'assignation des speakers pour garantir l'ordre chronologique
                                 all_segments.sort(key=get_segment_order_key)
-                                logger.info(f"[{transcription_id}] ✅ Diarization completed and assigned to segments")
+                                logger.info(f"[{transcription_id}] ✅ Diarization completed and assigned to segments | Re-sorted chronologically")
                             else:
                                 logger.warning(f"[{transcription_id}] ⚠️ Diarization returned no segments")
                         else:
@@ -1185,7 +1227,7 @@ def aggregate_segments_task(self, transcription_id: str):
         # pour garantir que le texte correspond exactement à l'ordre chronologique des segments
         # et que chaque segment avec son texte est pris en compte dans l'ordre correct
         
-        # Re-trier avec la clé de point médian pour gérer les chevauchements (au cas où la diarisation aurait modifié l'ordre)
+        # Re-trier par ordre chronologique (au cas où la diarisation aurait modifié l'ordre)
         all_segments.sort(key=get_segment_order_key)
         
         # Construire le texte final en joignant les segments dans l'ordre chronologique
