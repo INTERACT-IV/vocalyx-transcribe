@@ -356,7 +356,19 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         
         logger.info(f"[{transcription_id}] 💾 Results saved to API (status: {status})")
         
-        # 5. Si l'enrichissement est demandé, déclencher la tâche d'enrichissement
+        # 5. Supprimer le fichier .wav original après transcription réussie
+        if file_path:
+            try:
+                file_path_obj = Path(file_path)
+                if file_path_obj.exists() and file_path_obj.suffix.lower() == '.wav':
+                    file_path_obj.unlink()
+                    logger.info(f"[{transcription_id}] 🗑️ Original audio file deleted: {file_path}")
+                elif file_path_obj.exists():
+                    logger.debug(f"[{transcription_id}] ℹ️ File not deleted (not .wav): {file_path}")
+            except Exception as delete_error:
+                logger.warning(f"[{transcription_id}] ⚠️ Failed to delete original audio file: {delete_error}")
+        
+        # 6. Si l'enrichissement est demandé, déclencher la tâche d'enrichissement
         if enrichment_requested:
             trigger_enrichment_task(transcription_id, api_client)
         
@@ -389,6 +401,19 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         
         # Si toutes les tentatives échouent
         logger.error(f"[{transcription_id}] ⛔ All retries exhausted")
+        
+        # Supprimer le fichier .wav original même en cas d'échec
+        if file_path:
+            try:
+                file_path_obj = Path(file_path)
+                if file_path_obj.exists() and file_path_obj.suffix.lower() == '.wav':
+                    file_path_obj.unlink()
+                    logger.info(f"[{transcription_id}] 🗑️ Original audio file deleted after error: {file_path}")
+                elif file_path_obj.exists():
+                    logger.debug(f"[{transcription_id}] ℹ️ File not deleted (not .wav): {file_path}")
+            except Exception as delete_error:
+                logger.warning(f"[{transcription_id}] ⚠️ Failed to delete original audio file after error: {delete_error}")
+        
         return {
             "status": "error",
             "transcription_id": transcription_id,
@@ -629,6 +654,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         
     except Exception as e:
         logger.error(f"[{transcription_id}] ❌ Orchestration error: {e}", exc_info=True)
+        api_client = None
         try:
             api_client = get_api_client()
             api_client.update_transcription(transcription_id, {
@@ -637,6 +663,20 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             })
         except:
             pass
+        
+        # Supprimer le fichier .wav original même en cas d'échec d'orchestration
+        try:
+            if api_client:
+                transcription = api_client.get_transcription(transcription_id)
+                if transcription and transcription.get('file_path'):
+                    original_file_path = transcription.get('file_path')
+                    original_file_path_obj = Path(original_file_path)
+                    if original_file_path_obj.exists() and original_file_path_obj.suffix.lower() == '.wav':
+                        original_file_path_obj.unlink()
+                        logger.info(f"[{transcription_id}] 🗑️ Original audio file deleted after orchestration error: {original_file_path}")
+        except Exception as delete_error:
+            logger.warning(f"[{transcription_id}] ⚠️ Failed to delete original audio file after orchestration error: {delete_error}")
+        
         raise
 
 @celery_app.task(
@@ -1269,6 +1309,19 @@ def aggregate_segments_task(self, transcription_id: str):
             f"Result saved to database"
         )
         
+        # Supprimer le fichier .wav original après transcription réussie
+        if transcription and transcription.get('file_path'):
+            original_file_path = transcription.get('file_path')
+            try:
+                original_file_path_obj = Path(original_file_path)
+                if original_file_path_obj.exists() and original_file_path_obj.suffix.lower() == '.wav':
+                    original_file_path_obj.unlink()
+                    logger.info(f"[{transcription_id}] 🗑️ Original audio file deleted: {original_file_path}")
+                elif original_file_path_obj.exists():
+                    logger.debug(f"[{transcription_id}] ℹ️ File not deleted (not .wav): {original_file_path}")
+            except Exception as delete_error:
+                logger.warning(f"[{transcription_id}] ⚠️ Failed to delete original audio file: {delete_error}")
+        
         # Nettoyer les données Redis (transcription + diarisation)
         try:
             redis_manager.cleanup(transcription_id, total_segments)
@@ -1315,6 +1368,7 @@ def aggregate_segments_task(self, transcription_id: str):
         
     except Exception as e:
         logger.error(f"[{transcription_id}] ❌ Aggregation error: {e}", exc_info=True)
+        api_client = None
         try:
             api_client = get_api_client()
             api_client.update_transcription(transcription_id, {
@@ -1323,6 +1377,20 @@ def aggregate_segments_task(self, transcription_id: str):
             })
         except:
             pass
+        
+        # Supprimer le fichier .wav original même en cas d'échec
+        try:
+            if api_client:
+                transcription = api_client.get_transcription(transcription_id)
+                if transcription and transcription.get('file_path'):
+                    original_file_path = transcription.get('file_path')
+                    original_file_path_obj = Path(original_file_path)
+                    if original_file_path_obj.exists() and original_file_path_obj.suffix.lower() == '.wav':
+                        original_file_path_obj.unlink()
+                        logger.info(f"[{transcription_id}] 🗑️ Original audio file deleted after aggregation error: {original_file_path}")
+        except Exception as delete_error:
+            logger.warning(f"[{transcription_id}] ⚠️ Failed to delete original audio file after aggregation error: {delete_error}")
+        
         raise
 
 if __name__ == "__main__":
