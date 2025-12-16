@@ -70,7 +70,8 @@ class Config:
             'vad_enabled': 'true',
             'beam_size': '1',  # Optimisé pour CPU (greedy search, plus rapide)
             'best_of': '1',    # Pas de recherche multiple (optimisation CPU)
-            'temperature': '0.0'
+            'temperature': '0.0',
+            'transcription_timeout': '300'  # Timeout de transcription en secondes (défaut: 5 minutes)
         }
         
         config['PATHS'] = {
@@ -226,6 +227,12 @@ class Config:
         self.beam_size = self.config.getint('PERFORMANCE', 'beam_size', fallback=1)
         self.best_of = self.config.getint('PERFORMANCE', 'best_of', fallback=1)
         self.temperature = self.config.getfloat('PERFORMANCE', 'temperature')
+        
+        # Timeout de transcription (en secondes)
+        self.transcription_timeout = int(os.environ.get(
+            'TRANSCRIPTION_TIMEOUT',
+            self.config.getint('PERFORMANCE', 'transcription_timeout', fallback=300)
+        ))
         
         # PATHS
         self.upload_dir = Path(os.environ.get(

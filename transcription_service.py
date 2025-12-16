@@ -180,16 +180,18 @@ class TranscriptionService:
                     logger.error(f"❌ Error in transcription thread: {e}", exc_info=True)
                     result_container['error'] = e
             
-            # Exécuter dans un thread avec timeout global de 3 minutes
-            logger.info(f"🚀 Starting transcription in separate thread with 3min timeout...")
+            # Exécuter dans un thread avec timeout configurable
+            transcription_timeout = getattr(self.config, 'transcription_timeout', 300)  # Défaut: 5 minutes
+            timeout_minutes = transcription_timeout / 60
+            logger.info(f"🚀 Starting transcription in separate thread with {timeout_minutes:.1f}min timeout ({transcription_timeout}s)...")
             thread = threading.Thread(target=transcribe_with_timeout, daemon=True)
             thread.start()
-            thread.join(timeout=180)  # 3 minutes timeout global
+            thread.join(timeout=transcription_timeout)
             
             if thread.is_alive():
                 # Le thread est toujours en vie après le timeout = blocage
-                logger.error(f"❌ TIMEOUT: Transcription thread still alive after 180s - forcing error")
-                raise TimeoutError("Transcription timeout after 180s - generator appears to be blocked")
+                logger.error(f"❌ TIMEOUT: Transcription thread still alive after {transcription_timeout}s - forcing error")
+                raise TimeoutError(f"Transcription timeout after {transcription_timeout}s - generator appears to be blocked")
             
             # Vérifier les résultats
             if result_container['error']:
