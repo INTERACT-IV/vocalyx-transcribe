@@ -60,18 +60,21 @@ class Config:
             'model': './models/transcribe/openai-whisper-small',
             'device': 'cpu',
             'compute_type': 'int8',
-            'cpu_threads': '8',
+            'cpu_threads': '10',
             'language': 'fr'
         }
         
         config['PERFORMANCE'] = {
-            'max_workers': '2',
+            'max_workers': '1',
             'segment_length_ms': '45000',
             'vad_enabled': 'true',
             'beam_size': '1',  # Optimisé pour CPU (greedy search, plus rapide)
             'best_of': '1',    # Pas de recherche multiple (optimisation CPU)
             'temperature': '0.0',
-            'transcription_timeout': '300'  # Timeout de transcription en secondes (défaut: 5 minutes)
+            'transcription_timeout': '300',  # Timeout de transcription en secondes (défaut: 5 minutes)
+            # Nombre de workers parallèles internes (ThreadPoolExecutor) pour transcrire les segments
+            # Laisser vide pour auto (min(CPU cores, 8)). Sinon, fixer une valeur explicite (ex: 2, 4).
+            'parallel_workers': '',
         }
         
         config['PATHS'] = {
@@ -210,13 +213,31 @@ class Config:
             self.segment_length_ms = base_segment_length_ms  # 45s pour CPU puissant
             logger.info(f"⚙️ Adaptive segmentation: CPU puissant ({self.cpu_count} cores) → segments de 45s")
         
-        # Nombre optimal de workers parallèles pour transcription
+        # Nombre optimal de workers parallèles pour transcription (ThreadPoolExecutor)
         # Limiter à 1 worker par core pour éviter la surcharge mémoire
         # Whisper libère le GIL, donc ThreadPoolExecutor est optimal
         optimal_parallel_workers = min(self.cpu_count, 8)  # Max 8 workers même pour CPU très puissant
-        # Permettre override via config.ini si nécessaire (désactivé pour l'instant)
-        self.parallel_workers = optimal_parallel_workers
-        logger.info(f"⚙️ Parallel transcription: {self.parallel_workers} worker(s) optimal")
+        # Permettre override via config.ini ou variable d'environnement
+        parallel_workers_str = os.environ.get(
+            'PARALLEL_WORKERS',
+            self.config.get('PERFORMANCE', 'parallel_workers', fallback='').strip()
+        )
+        if parallel_workers_str:
+            try:
+                self.parallel_workers = max(1, min(int(parallel_workers_str), 32))
+                logger.info(
+                    f"⚙️ Parallel transcription: override from config/env → "
+                    f"{self.parallel_workers} worker(s) (requested: {parallel_workers_str})"
+                )
+            except ValueError:
+                self.parallel_workers = optimal_parallel_workers
+                logger.warning(
+                    f"⚠️ Invalid PARALLEL_WORKERS value '{parallel_workers_str}', "
+                    f"using auto value: {self.parallel_workers}"
+                )
+        else:
+            self.parallel_workers = optimal_parallel_workers
+            logger.info(f"⚙️ Parallel transcription: auto → {self.parallel_workers} worker(s)")
         
         vad_enabled_str = os.environ.get(
             'VAD_ENABLED', 

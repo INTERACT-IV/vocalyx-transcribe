@@ -73,7 +73,7 @@ max_workers = 1
 # Nombre de workers parallèles internes (ThreadPoolExecutor) pour transcrire les segments
 # Laisser vide pour auto (min(CPU cores, 8)).
 # Sinon, fixer une valeur explicite (ex: 2, 4) si vous voulez limiter ou augmenter le parallélisme interne.
-parallel_workers =
+parallel_workers = 1
 
 # Longueur des segments audio en millisecondes (BASE)
 # ⚙️ DÉCOUPAGE ADAPTATIF: La taille sera automatiquement ajustée selon le CPU:

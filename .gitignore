@@ -215,3 +215,5 @@ models/openai-whisper-small
 tmp_uploads/
 
 transcriptions.db
+
+config.ini
