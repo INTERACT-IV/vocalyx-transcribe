@@ -8,7 +8,6 @@ import time
 import threading
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from faster_whisper import WhisperModel
 from audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
 from stereo_diarization import StereoDiarizationService
@@ -243,14 +242,14 @@ class TranscriptionService:
         
         return text_full.strip(), segments_list, info.language
     
-    def _transcribe_parallel(
+    def _transcribe_sequential(
         self, 
         segment_paths: List[Path], 
         use_vad: bool, 
         log_prefix: str
     ) -> Tuple[List[Dict], str, Optional[str]]:
         """
-        Transcrit plusieurs segments en parallèle.
+        Transcrit plusieurs segments de manière séquentielle dans le processus Celery.
         
         Args:
             segment_paths: Liste des chemins vers les segments audio
@@ -267,67 +266,38 @@ class TranscriptionService:
         full_text = ""
         language_detected = None
         num_segments = len(segment_paths)
-        max_workers = min(self.config.parallel_workers, num_segments)
         
-        logger.info(f"{log_prefix}⚡ Starting parallel transcription: {num_segments} segments with {max_workers} worker(s)")
+        logger.info(f"{log_prefix}⚡ Starting sequential transcription: {num_segments} segments")
         
-        # Transcription parallèle avec ThreadPoolExecutor
-        # ThreadPoolExecutor car Whisper libère le GIL pendant l'inférence
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Soumettre tous les segments
-            future_to_segment = {
-                executor.submit(self.transcribe_segment, segment_path, use_vad): (i, segment_path)
-                for i, segment_path in enumerate(segment_paths)
-            }
-            
-            # Traiter les résultats au fur et à mesure qu'ils arrivent
-            completed = 0
-            results = {}
-            
-            for future in as_completed(future_to_segment):
-                i, segment_path = future_to_segment[future]
-                try:
-                    text, segments_list, lang = future.result()
-                    results[i] = {
-                        'text': text,
-                        'segments': segments_list,
-                        'lang': lang
-                    }
-                    completed += 1
-                    logger.info(f"{log_prefix}✅ Segment {i+1}/{num_segments} completed ({completed}/{num_segments} done)")
-                    
-                    if language_detected is None:
-                        language_detected = lang
-                        
-                except Exception as e:
-                    logger.error(f"{log_prefix}❌ Error transcribing segment {i+1}: {e}", exc_info=True)
-                    # Continuer avec les autres segments en cas d'erreur
-                    results[i] = {
-                        'text': '',
-                        'segments': [],
-                        'lang': None
-                    }
-        
-        # Assembler les résultats dans l'ordre (triés par index de segment)
+        # Transcription séquentielle directement dans le processus Celery
         time_offset = 0.0
-        for i in sorted(results.keys()):
-            result = results[i]
-            segments_list = result['segments']
-            text = result['text']
-            
-            # Ajuster les timestamps avec l'offset
-            for seg in segments_list:
-                seg["start"] = round(seg["start"] + time_offset, 2)
-                seg["end"] = round(seg["end"] + time_offset, 2)
-                full_segments.append(seg)
-            
-            # Mettre à jour l'offset pour le prochain segment
-            if segments_list:
-                time_offset = full_segments[-1]["end"]
-            
-            full_text += text + " "
+        for i, segment_path in enumerate(segment_paths):
+            try:
+                text, segments_list, lang = self.transcribe_segment(segment_path, use_vad)
+                
+                # Ajuster les timestamps avec l'offset
+                for seg in segments_list:
+                    seg["start"] = round(seg["start"] + time_offset, 2)
+                    seg["end"] = round(seg["end"] + time_offset, 2)
+                    full_segments.append(seg)
+                
+                # Mettre à jour l'offset pour le prochain segment
+                if segments_list:
+                    time_offset = full_segments[-1]["end"]
+                
+                full_text += text + " "
+                
+                if language_detected is None:
+                    language_detected = lang
+                
+                logger.info(f"{log_prefix}✅ Segment {i+1}/{num_segments} completed")
+                    
+            except Exception as e:
+                logger.error(f"{log_prefix}❌ Error transcribing segment {i+1}: {e}", exc_info=True)
+                # Continuer avec les autres segments en cas d'erreur
+                continue
         
-        logger.info(f"{log_prefix}✅ Parallel transcription completed: {len(full_segments)} total segments")
+        logger.info(f"{log_prefix}✅ Sequential transcription completed: {len(full_segments)} total segments")
         
         return full_segments, full_text.strip(), language_detected
     
@@ -394,15 +364,15 @@ class TranscriptionService:
             )
             logger.info(f"{log_prefix}🔪 Created {len(segment_paths)} segment(s) (adaptive size: {self.config.segment_length_ms}ms)")
             
-            # 4. Transcription (parallélisée si plusieurs segments)
+            # 4. Transcription (séquentielle dans le processus Celery)
             full_text = ""
             full_segments = []
             language_detected = None
             
-            # Parallélisation pour plusieurs segments
+            # Transcription séquentielle pour plusieurs segments
             if len(segment_paths) > 1:
-                logger.info(f"{log_prefix}⚡ Parallel transcription: {len(segment_paths)} segments with {self.config.parallel_workers} worker(s)")
-                full_segments, full_text, language_detected = self._transcribe_parallel(
+                logger.info(f"{log_prefix}⚡ Sequential transcription: {len(segment_paths)} segments")
+                full_segments, full_text, language_detected = self._transcribe_sequential(
                     segment_paths, use_vad, log_prefix
                 )
             else:
