@@ -318,9 +318,14 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         # 2. Mettre à jour le statut à "processing" (début réel du traitement)
         # ⚠️ IMPORTANT : Le statut "processing" indique que le worker a commencé le traitement réel
         # Le temps de traitement sera calculé à partir de maintenant
+        # ✅ NOUVEAU : Enregistrer le temps de début réel du traitement
+        from datetime import datetime
+        processing_start_datetime = datetime.utcnow()
+        
         api_client.update_transcription(transcription_id, {
             "status": "processing",
-            "worker_id": config.instance_name
+            "worker_id": config.instance_name,
+            "processing_start_time": processing_start_datetime.isoformat()  # ✅ NOUVEAU
         })
         logger.info(f"[{transcription_id}] ⚙️ Status updated to 'processing' (real processing started)")
         
@@ -357,6 +362,23 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         enrichment_requested = transcription.get('enrichment_requested', False)
         status = "transcribed" if enrichment_requested else "done"
         
+        # ✅ NOUVEAU : Calculer les métriques de performance
+        queued_at = transcription.get('queued_at')
+        processing_start_time_str = transcription.get('processing_start_time')
+        
+        # Calculer le temps d'attente dans la file
+        queue_wait_time = None
+        if queued_at and processing_start_time_str:
+            try:
+                from datetime import datetime
+                queued_dt = datetime.fromisoformat(queued_at.replace('Z', '+00:00'))
+                start_dt = datetime.fromisoformat(processing_start_time_str.replace('Z', '+00:00'))
+                queue_wait_time = round((start_dt - queued_dt).total_seconds(), 2)
+            except Exception as e:
+                logger.warning(f"[{transcription_id}] ⚠️ Failed to calculate queue_wait_time: {e}")
+        
+        processing_end_datetime = datetime.utcnow()
+        
         api_client.update_transcription(transcription_id, {
             "status": status,
             "text": result["text"],
@@ -364,7 +386,9 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
             "language": result["language"],
             "duration": result["duration"],
             "processing_time": processing_time,
-            "segments_count": len(result["segments"])
+            "segments_count": len(result["segments"]),
+            "queue_wait_time": queue_wait_time,  # ✅ NOUVEAU
+            "processing_end_time": processing_end_datetime.isoformat()  # ✅ NOUVEAU
         })
         
         logger.info(f"[{transcription_id}] 💾 Results saved to API (status: {status})")
@@ -469,10 +493,15 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         use_vad = transcription.get('vad_enabled', True)
         whisper_model = transcription.get('whisper_model', 'small')
         
+        # ✅ NOUVEAU : Enregistrer le temps de début réel de l'orchestration
+        from datetime import datetime
+        processing_start_datetime = datetime.utcnow()
+        
         # Mettre à jour le statut
         api_client.update_transcription(transcription_id, {
             "status": "processing",
-            "worker_id": f"{config.instance_name}-orchestrator"
+            "worker_id": f"{config.instance_name}-orchestrator",
+            "processing_start_time": processing_start_datetime.isoformat()  # ✅ NOUVEAU
         })
         
         # 1. Pré-traiter l'audio
@@ -583,6 +612,33 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             "diarization_segment_paths": [str(p) for p in diarization_segment_paths],
             "diarization_time_offsets": diarization_time_offsets
         }
+        
+        # ⚠️ IMPORTANT : Calculer un TTL dynamique basé sur la durée estimée du traitement
+        # TTL = durée audio * facteur de sécurité + marge
+        # Pour éviter l'expiration pendant le traitement
+        base_ttl = getattr(config, 'redis_transcription_ttl', 14400)  # TTL de base (4h par défaut)
+        audio_duration = get_audio_duration(file_path_obj)
+        # Estimer le temps de traitement : ~1.5x la durée audio (conservateur)
+        estimated_processing_time = max(audio_duration * 1.5, 300)  # Minimum 5 minutes
+        # TTL = temps estimé + marge de sécurité (2h)
+        dynamic_ttl = int(estimated_processing_time + 7200)  # +2h de marge
+        # Utiliser le maximum entre TTL de base et TTL dynamique
+        ttl = max(base_ttl, dynamic_ttl)
+        
+        # ✅ NOUVEAU : Stocker le TTL original dans les métadonnées pour le monitoring
+        segments_metadata["ttl_original"] = ttl
+        
+        logger.info(
+            f"[{transcription_id}] 🔧 Redis TTL calculated | "
+            f"Base TTL: {base_ttl}s | "
+            f"Audio duration: {audio_duration:.1f}s | "
+            f"Estimated processing: {estimated_processing_time:.1f}s | "
+            f"Dynamic TTL: {dynamic_ttl}s | "
+            f"Final TTL: {ttl}s ({ttl/3600:.1f}h)"
+        )
+        
+        redis_manager.store_metadata(transcription_id, segments_metadata, ttl)
+        redis_manager.reset_completed_count(transcription_id, ttl)  # Utiliser le TTL dynamique
         
         # ⚠️ IMPORTANT : Calculer un TTL dynamique basé sur la durée estimée du traitement
         # TTL = durée audio * facteur de sécurité + marge
@@ -841,6 +897,21 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         else:
             ttl = base_ttl
         
+        # ✅ NOUVEAU : Vérifier la santé du TTL avant de continuer
+        ttl_health = redis_manager.check_ttl_health(transcription_id, threshold_percent=0.2)
+        
+        if ttl_health['alert']:
+            logger.warning(
+                f"[{transcription_id}] ⚠️ TTL ALERT | "
+                f"Remaining: {ttl_health['ttl_remaining']}s ({ttl_health['percent_remaining']:.1f}%) | "
+                f"Action: Renewing TTL to {ttl}s"
+            )
+        elif ttl_health['percent_remaining'] < 50.0:  # 50% restant
+            logger.info(
+                f"[{transcription_id}] ℹ️ TTL WARNING | "
+                f"Remaining: {ttl_health['ttl_remaining']}s ({ttl_health['percent_remaining']:.1f}%)"
+            )
+        
         # Mettre à jour les métadonnées avec TTL renouvelé
         metadata['completed_segments'] = completed_count
         redis_manager.store_metadata(transcription_id, metadata, ttl)
@@ -1006,6 +1077,21 @@ def diarize_segment_task(self, transcription_id: str, segment_path: str, segment
             ttl = max(base_ttl, dynamic_ttl)
         else:
             ttl = base_ttl
+        
+        # ✅ NOUVEAU : Vérifier la santé du TTL avant de continuer
+        ttl_health = redis_manager.check_ttl_health(transcription_id, threshold_percent=0.2)
+        
+        if ttl_health['alert']:
+            logger.warning(
+                f"[{transcription_id}] ⚠️ TTL ALERT (diarization) | "
+                f"Remaining: {ttl_health['ttl_remaining']}s ({ttl_health['percent_remaining']:.1f}%) | "
+                f"Action: Renewing TTL to {ttl}s"
+            )
+        elif ttl_health['percent_remaining'] < 50.0:  # 50% restant
+            logger.info(
+                f"[{transcription_id}] ℹ️ TTL WARNING (diarization) | "
+                f"Remaining: {ttl_health['ttl_remaining']}s ({ttl_health['percent_remaining']:.1f}%)"
+            )
         
         # ⚠️ IMPORTANT : Renouveler le TTL de toutes les clés Redis associées à cette transcription
         redis_manager.refresh_ttl(transcription_id, ttl, total_diarization_segments)
@@ -1192,6 +1278,17 @@ def aggregate_segments_task(self, transcription_id: str):
     try:
         redis_manager = get_redis_manager()
         metadata = redis_manager.get_metadata(transcription_id)
+        
+        # ✅ NOUVEAU : Vérifier la santé du TTL avant l'agrégation
+        if metadata:
+            ttl_health = redis_manager.check_ttl_health(transcription_id, threshold_percent=0.2)
+            if not ttl_health['healthy']:
+                logger.error(
+                    f"[{transcription_id}] ❌ TTL EXPIRED | "
+                    f"Cannot aggregate segments - data may be lost | "
+                    f"TTL remaining: {ttl_health['ttl_remaining']}s"
+                )
+                # Ne pas lever d'exception, mais logger l'erreur
         
         if not metadata:
             # Cas particulier : métadonnées manquantes (souvent lié à un TTL expiré ou à un reset de Redis)
@@ -1387,11 +1484,28 @@ def aggregate_segments_task(self, transcription_id: str):
         # Le temps réel est le temps écoulé depuis le début de l'orchestration (quand le worker a commencé)
         # Cela exclut le temps d'attente dans la file Celery
         if orchestration_start_time:
-            processing_end_time = time.time()
-            total_processing_time = round(processing_end_time - orchestration_start_time, 2)
+            processing_end_time_float = time.time()
+            total_processing_time = round(processing_end_time_float - orchestration_start_time, 2)
         else:
             # Fallback : max segment + agrégation (approximation)
             total_processing_time = round(max_segment_time + aggregation_time, 2)
+        
+        # ✅ NOUVEAU : Calculer les métriques de performance
+        queued_at = transcription.get('queued_at') if transcription else None
+        processing_start_time_str = transcription.get('processing_start_time') if transcription else None
+        
+        # Calculer le temps d'attente dans la file
+        queue_wait_time = None
+        if queued_at and processing_start_time_str:
+            try:
+                from datetime import datetime
+                queued_dt = datetime.fromisoformat(queued_at.replace('Z', '+00:00'))
+                start_dt = datetime.fromisoformat(processing_start_time_str.replace('Z', '+00:00'))
+                queue_wait_time = round((start_dt - queued_dt).total_seconds(), 2)
+            except Exception as e:
+                logger.warning(f"[{transcription_id}] ⚠️ Failed to calculate queue_wait_time: {e}")
+        
+        processing_end_datetime = datetime.utcnow()
         
         api_client.update_transcription(transcription_id, {
             "status": status,
@@ -1400,7 +1514,9 @@ def aggregate_segments_task(self, transcription_id: str):
             "language": language_detected,
             "duration": metadata.get('original_duration', 0.0),
             "processing_time": total_processing_time,
-            "segments_count": len(all_segments)
+            "segments_count": len(all_segments),
+            "queue_wait_time": queue_wait_time,  # ✅ NOUVEAU
+            "processing_end_time": processing_end_datetime.isoformat()  # ✅ NOUVEAU
         })
         
         logger.info(

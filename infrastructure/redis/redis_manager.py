@@ -158,6 +158,63 @@ class RedisTranscriptionManager:
         self.client.expire(key, 3600)
         return count
     
+    def check_ttl_health(self, transcription_id: str, threshold_percent: float = 0.2) -> dict:
+        """
+        Vérifie la santé du TTL pour une transcription.
+        
+        Args:
+            transcription_id: ID de la transcription
+            threshold_percent: Seuil d'alerte (ex: 0.2 = 20% du TTL restant)
+        
+        Returns:
+            dict: {
+                'healthy': bool,
+                'ttl_remaining': int,  # Secondes restantes
+                'ttl_original': int,   # TTL original
+                'percent_remaining': float,
+                'alert': bool,
+                'message': str
+            }
+        """
+        key = f"transcription:{transcription_id}:segments"
+        ttl_remaining = self.client.ttl(key)
+        
+        if ttl_remaining == -2:  # Clé n'existe plus
+            return {
+                'healthy': False,
+                'ttl_remaining': 0,
+                'ttl_original': 0,
+                'percent_remaining': 0.0,
+                'alert': True,
+                'message': f'Key expired or not found for transcription {transcription_id}'
+            }
+        
+        if ttl_remaining == -1:  # Pas de TTL (ne devrait pas arriver)
+            return {
+                'healthy': True,
+                'ttl_remaining': -1,
+                'ttl_original': -1,
+                'percent_remaining': 100.0,
+                'alert': False,
+                'message': 'No TTL set (unlimited)'
+            }
+        
+        # Récupérer le TTL original depuis les métadonnées
+        metadata = self.get_metadata(transcription_id)
+        ttl_original = metadata.get('ttl_original', ttl_remaining) if metadata else ttl_remaining
+        
+        percent_remaining = (ttl_remaining / ttl_original * 100) if ttl_original > 0 else 0
+        alert = percent_remaining < (threshold_percent * 100)
+        
+        return {
+            'healthy': not alert and ttl_remaining > 0,
+            'ttl_remaining': ttl_remaining,
+            'ttl_original': ttl_original,
+            'percent_remaining': percent_remaining,
+            'alert': alert,
+            'message': f'TTL: {ttl_remaining}s remaining ({percent_remaining:.1f}%)'
+        }
+    
     def cleanup(self, transcription_id: str, total_segments: int):
         """Nettoie toutes les clés Redis associées à une transcription"""
         pipe = self.client.pipeline()
