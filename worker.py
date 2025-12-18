@@ -57,6 +57,12 @@ def on_worker_init(**kwargs):
         WORKER_START_TIME = datetime.now()
         WORKER_PROCESS.cpu_percent(interval=None)
         logger.info(f"Worker {WORKER_PROCESS.pid} initialisé pour monitoring psutil.")
+        # Loguer la configuration Redis importante pour les transcriptions distribuées
+        try:
+            redis_ttl = getattr(config, 'redis_transcription_ttl', None)
+            logger.info(f"🔧 Redis transcription TTL configuré: {redis_ttl}s")
+        except Exception as cfg_err:
+            logger.warning(f"⚠️ Impossible de lire redis_transcription_ttl: {cfg_err}")
     except Exception as e:
         logger.error(f"Erreur lors de l'initialisation de psutil: {e}")
 
@@ -1113,7 +1119,28 @@ def aggregate_segments_task(self, transcription_id: str):
         metadata = redis_manager.get_metadata(transcription_id)
         
         if not metadata:
-            raise ValueError(f"Metadata not found for transcription {transcription_id}")
+            # Cas particulier : métadonnées manquantes (souvent lié à un TTL expiré ou à un reset de Redis)
+            error_message = f"Metadata not found for transcription {transcription_id}"
+            logger.error(
+                f"[{transcription_id}] ❌ Aggregation error (missing metadata): {error_message}"
+            )
+            try:
+                api_client = get_api_client()
+                api_client.update_transcription(transcription_id, {
+                    "status": "error",
+                    "error_message": error_message
+                })
+            except Exception as update_err:
+                logger.error(
+                    f"[{transcription_id}] Failed to update transcription status after missing metadata: {update_err}",
+                    exc_info=True
+                )
+            # Ne pas lever d'exception ici pour éviter de laisser la tâche bloquée en retry
+            return {
+                "status": "error",
+                "transcription_id": transcription_id,
+                "error": error_message
+            }
         
         total_segments = metadata['total_segments']
         use_diarization = metadata.get('use_diarization', False)

@@ -53,7 +53,8 @@ class Config:
             # Compression des données JSON (réduit la mémoire et le réseau)
             'compress_data': 'true',
             # TTL par défaut pour les segments (en secondes)
-            'default_ttl': '3600'
+            # 14400 = 4 heures (augmenté pour éviter l'expiration pendant les transcriptions distribuées longues)
+            'default_ttl': '14400'
         }
         
         config['WHISPER'] = {
@@ -72,9 +73,6 @@ class Config:
             'best_of': '1',    # Pas de recherche multiple (optimisation CPU)
             'temperature': '0.0',
             'transcription_timeout': '300',  # Timeout de transcription en secondes (défaut: 5 minutes)
-            # Nombre de workers parallèles internes (ThreadPoolExecutor) pour transcrire les segments
-            # Laisser vide pour auto (min(CPU cores, 8)). Sinon, fixer une valeur explicite (ex: 2, 4).
-            'parallel_workers': '',
         }
         
         config['PATHS'] = {
@@ -102,10 +100,6 @@ class Config:
             'file_enabled': 'true',
             'file_path': 'logs/vocalyx-transcribe.log',
             'colored': 'true'
-        }
-        
-        config['SECURITY'] = {
-            'internal_api_key': 'CHANGE_ME_SECRET_INTERNAL_KEY_12345'
         }
         
         with open(self.config_file, 'w') as f:
@@ -166,7 +160,7 @@ class Config:
             'REDIS_TRANSCRIPTION', 'compress_data', fallback=True
         )
         self.redis_transcription_ttl = self.config.getint(
-            'REDIS_TRANSCRIPTION', 'default_ttl', fallback=3600
+            'REDIS_TRANSCRIPTION', 'default_ttl', fallback=14400
         )
         
         # WHISPER
@@ -213,32 +207,6 @@ class Config:
             self.segment_length_ms = base_segment_length_ms  # 45s pour CPU puissant
             logger.info(f"⚙️ Adaptive segmentation: CPU puissant ({self.cpu_count} cores) → segments de 45s")
         
-        # Nombre optimal de workers parallèles pour transcription (ThreadPoolExecutor)
-        # Limiter à 1 worker par core pour éviter la surcharge mémoire
-        # Whisper libère le GIL, donc ThreadPoolExecutor est optimal
-        optimal_parallel_workers = min(self.cpu_count, 8)  # Max 8 workers même pour CPU très puissant
-        # Permettre override via config.ini ou variable d'environnement
-        parallel_workers_str = os.environ.get(
-            'PARALLEL_WORKERS',
-            self.config.get('PERFORMANCE', 'parallel_workers', fallback='').strip()
-        )
-        if parallel_workers_str:
-            try:
-                self.parallel_workers = max(1, min(int(parallel_workers_str), 32))
-                logger.info(
-                    f"⚙️ Parallel transcription: override from config/env → "
-                    f"{self.parallel_workers} worker(s) (requested: {parallel_workers_str})"
-                )
-            except ValueError:
-                self.parallel_workers = optimal_parallel_workers
-                logger.warning(
-                    f"⚠️ Invalid PARALLEL_WORKERS value '{parallel_workers_str}', "
-                    f"using auto value: {self.parallel_workers}"
-                )
-        else:
-            self.parallel_workers = optimal_parallel_workers
-            logger.info(f"⚙️ Parallel transcription: auto → {self.parallel_workers} worker(s)")
-        
         vad_enabled_str = os.environ.get(
             'VAD_ENABLED', 
             self.config.get('PERFORMANCE', 'vad_enabled')
@@ -266,15 +234,6 @@ class Config:
         self.vad_min_speech_duration_ms = self.config.getint('VAD', 'min_speech_duration_ms', fallback=250)
         self.vad_min_silence_duration_ms = self.config.getint('VAD', 'min_silence_duration_ms', fallback=2000)
         self.vad_speech_pad_ms = self.config.getint('VAD', 'speech_pad_ms', fallback=400)
-        
-        # SECURITY
-        self.internal_api_key = os.environ.get(
-            'INTERNAL_API_KEY', 
-            self.config.get('SECURITY', 'internal_api_key')
-        )
-        
-        if self.internal_api_key == 'CHANGE_ME_SECRET_INTERNAL_KEY_12345':
-            logging.warning("⚠️ SECURITY: Internal API key is using default value. Please change it!")
         
         # LOGGING
         self.log_level = os.environ.get(

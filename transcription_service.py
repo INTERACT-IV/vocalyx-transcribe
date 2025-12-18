@@ -103,7 +103,6 @@ class TranscriptionService:
         
         segments_list = []
         text_full = ""
-        segments_list_raw = [] # Initialiser ici
         info = None # Initialiser info
         
         logger.info(f"🎯 Starting Whisper transcription (VAD: {use_vad})...")

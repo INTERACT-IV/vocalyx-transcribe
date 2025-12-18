@@ -18,7 +18,7 @@ vocalyx-transcribe/
 ├── stereo_diarization.py        # Service de diarisation stéréo (sans modèle ML)
 ├── application/
 │   └── services/
-│       └── transcription_worker_service.py  # Service métier
+│       └── diarization_merger.py            # Service de fusion de diarisation
 ├── infrastructure/
 │   └── api/
 │       └── api_client.py        # Client API
@@ -31,7 +31,7 @@ vocalyx-transcribe/
 - **Diarisation** : Identification et séparation des locuteurs
 - **Traitement audio** : VAD (Voice Activity Detection), segmentation
 - **Cache de modèles** : Réutilisation des modèles Whisper chargés
-- **Traitement parallèle** : Segmentation et transcription en parallèle
+- **Traitement séquentiel** : Segmentation et transcription séquentielle dans le processus Celery
 - **Monitoring** : Statistiques de performance et santé du worker
 
 ## Dépendances principales
@@ -159,7 +159,7 @@ Voir `DOCUMENTATION_LOGS.md` pour la documentation complète des logs.
 ### Optimisations
 
 - **Cache de modèles** : Réduction du temps de chargement
-- **Traitement parallèle** : Utilisation de plusieurs workers
+- **Traitement distribué** : Utilisation de plusieurs workers Celery pour la distribution
 - **Segmentation adaptative** : Optimisation selon la durée
 - **VAD** : Réduction du temps de traitement
 

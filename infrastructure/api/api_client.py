@@ -17,7 +17,6 @@ class VocalyxAPIClient:
     
     def __init__(self, config):
         self.base_url = config.api_url.rstrip('/')
-        self.internal_key = config.internal_api_key
         self.timeout = httpx.Timeout(60.0, connect=5.0)
         
         # Client synchrone (suffisant pour le worker)
@@ -47,10 +46,8 @@ class VocalyxAPIClient:
             logger.error("⚠️ Worker will start but may fail to process tasks")
     
     def _get_headers(self) -> Dict[str, str]:
-        """Génère les headers d'authentification interne"""
-        return {
-            "X-Internal-Key": self.internal_key
-        }
+        """Génère les headers HTTP"""
+        return {}
     
     def get_transcription(self, transcription_id: str) -> Optional[Dict]:
         """
