@@ -303,7 +303,10 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         f"Task ID: {self.request.id} | "
         f"Mode: Single worker processing entire audio (non-distributed)"
     )
-    start_time = time.time()
+    
+    # ⚠️ IMPORTANT : Enregistrer le temps de début RÉEL du traitement (pas de la création de la tâche)
+    # Ce temps exclut le temps d'attente dans la file Celery
+    processing_start_time = time.time()
     
     try:
         use_vad = transcription.get('vad_enabled', True)
@@ -312,12 +315,14 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         
         logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad} | Diarization: {use_diarization} | Model: {whisper_model}")
         
-        # 2. Mettre à jour le statut à "processing"
+        # 2. Mettre à jour le statut à "processing" (début réel du traitement)
+        # ⚠️ IMPORTANT : Le statut "processing" indique que le worker a commencé le traitement réel
+        # Le temps de traitement sera calculé à partir de maintenant
         api_client.update_transcription(transcription_id, {
             "status": "processing",
             "worker_id": config.instance_name
         })
-        logger.info(f"[{transcription_id}] ⚙️ Status updated to 'processing'")
+        logger.info(f"[{transcription_id}] ⚙️ Status updated to 'processing' (real processing started)")
         
         # 3. Obtenir le service de transcription avec cache de modèles (Phase 3 - Optimisation)
         # Le cache réutilise les modèles déjà chargés, évitant 5-15s de chargement
@@ -336,7 +341,9 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         
         logger.info(f"[{transcription_id}] ✅ Transcription service completed")
         
-        processing_time = round(time.time() - start_time, 2)
+        # ⚠️ IMPORTANT : Calculer uniquement le temps de traitement RÉEL (sans temps d'attente)
+        processing_end_time = time.time()
+        processing_time = round(processing_end_time - processing_start_time, 2)
         
         logger.info(
             f"[{transcription_id}] ✅ Transcription completed | "
@@ -556,6 +563,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         
         # 5. Stocker les métadonnées dans Redis
         redis_manager = get_redis_manager()
+        # ⚠️ IMPORTANT : Enregistrer le temps de début RÉEL de l'orchestration (pas de la création de la tâche)
         orchestration_start_time = time.time()
         
         segments_metadata = {
@@ -576,9 +584,29 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             "diarization_time_offsets": diarization_time_offsets
         }
         
-        ttl = getattr(config, 'redis_transcription_ttl', 3600)
+        # ⚠️ IMPORTANT : Calculer un TTL dynamique basé sur la durée estimée du traitement
+        # TTL = durée audio * facteur de sécurité + marge
+        # Pour éviter l'expiration pendant le traitement
+        base_ttl = getattr(config, 'redis_transcription_ttl', 14400)  # TTL de base (4h par défaut)
+        audio_duration = get_audio_duration(file_path_obj)
+        # Estimer le temps de traitement : ~1.5x la durée audio (conservateur)
+        estimated_processing_time = max(audio_duration * 1.5, 300)  # Minimum 5 minutes
+        # TTL = temps estimé + marge de sécurité (2h)
+        dynamic_ttl = int(estimated_processing_time + 7200)  # +2h de marge
+        # Utiliser le maximum entre TTL de base et TTL dynamique
+        ttl = max(base_ttl, dynamic_ttl)
+        
+        logger.info(
+            f"[{transcription_id}] 🔧 Redis TTL calculated | "
+            f"Base TTL: {base_ttl}s | "
+            f"Audio duration: {audio_duration:.1f}s | "
+            f"Estimated processing: {estimated_processing_time:.1f}s | "
+            f"Dynamic TTL: {dynamic_ttl}s | "
+            f"Final TTL: {ttl}s ({ttl/3600:.1f}h)"
+        )
+        
         redis_manager.store_metadata(transcription_id, segments_metadata, ttl)
-        redis_manager.reset_completed_count(transcription_id)
+        redis_manager.reset_completed_count(transcription_id, ttl)  # Utiliser le TTL dynamique
         
         # Réinitialiser aussi le compteur de diarisation si nécessaire
         if use_diarization:
@@ -586,7 +614,8 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             diarization_counter_key = f"transcription:{transcription_id}:diarization_completed_count"
             redis_client.delete(diarization_counter_key)
             redis_client.set(diarization_counter_key, 0)
-            redis_client.expire(diarization_counter_key, 3600)
+            redis_client.expire(diarization_counter_key, ttl)  # Utiliser le même TTL dynamique
+            logger.debug(f"[{transcription_id}] 🔧 Diarization counter TTL set to {ttl}s")
         
         # 6. Créer une tâche pour chaque segment de transcription
         logger.info(
@@ -788,13 +817,32 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
             "time_offset": time_offset
         }
         
-        ttl = getattr(config, 'redis_transcription_ttl', 3600)
+        # ⚠️ IMPORTANT : Renouveler le TTL des données Redis pendant le traitement
+        # Cela évite l'expiration si le traitement prend plus de temps que prévu
+        base_ttl = getattr(config, 'redis_transcription_ttl', 14400)
+        # Calculer un TTL dynamique basé sur le temps restant estimé
+        if 'orchestration_start_time' in metadata:
+            elapsed_time = time.time() - metadata['orchestration_start_time']
+            remaining_segments = metadata.get('total_segments', 1) - completed_count - 1
+            # Estimer le temps restant : temps moyen par segment * segments restants
+            avg_time_per_segment = processing_time  # Utiliser le temps actuel comme estimation
+            estimated_remaining_time = max(avg_time_per_segment * remaining_segments, 300)  # Minimum 5 min
+            # TTL = temps restant estimé + marge de sécurité (1h)
+            dynamic_ttl = int(estimated_remaining_time + 3600)
+            ttl = max(base_ttl, dynamic_ttl)
+        else:
+            ttl = base_ttl
+        
         redis_manager.store_segment_result(transcription_id, segment_index, result, ttl)
         completed_count = redis_manager.increment_completed_count(transcription_id)
         
-        # Mettre à jour les métadonnées
+        # Mettre à jour les métadonnées avec TTL renouvelé
         metadata['completed_segments'] = completed_count
         redis_manager.store_metadata(transcription_id, metadata, ttl)
+        
+        # ⚠️ IMPORTANT : Renouveler le TTL de toutes les clés Redis associées à cette transcription
+        # Cela évite l'expiration si le traitement prend plus de temps que prévu
+        redis_manager.refresh_ttl(transcription_id, ttl, total_segments)
         
         logger.info(
             f"[{transcription_id}] ✅ DISTRIBUTED SEGMENT COMPLETED | "
@@ -931,9 +979,26 @@ def diarize_segment_task(self, transcription_id: str, segment_path: str, segment
             "time_offset": time_offset
         }
         
-        ttl = getattr(config, 'redis_transcription_ttl', 3600)
+        # ⚠️ IMPORTANT : Renouveler le TTL des données Redis pendant le traitement
+        base_ttl = getattr(config, 'redis_transcription_ttl', 14400)
+        # Utiliser le même TTL que pour les segments de transcription
+        if 'orchestration_start_time' in metadata:
+            elapsed_time = time.time() - metadata['orchestration_start_time']
+            remaining_segments = len(metadata.get('diarization_segment_paths', [])) - completed_count - 1
+            avg_time_per_segment = processing_time
+            estimated_remaining_time = max(avg_time_per_segment * remaining_segments, 300)
+            dynamic_ttl = int(estimated_remaining_time + 3600)
+            ttl = max(base_ttl, dynamic_ttl)
+        else:
+            ttl = base_ttl
+        
         redis_manager.store_diarization_result(transcription_id, segment_index, result, ttl)
         completed_count = redis_manager.increment_diarization_count(transcription_id)
+        
+        # ⚠️ IMPORTANT : Renouveler le TTL de toutes les clés Redis associées à cette transcription
+        diarization_segment_paths = metadata.get('diarization_segment_paths', [])
+        total_diarization_segments = len(diarization_segment_paths) if diarization_segment_paths else 0
+        redis_manager.refresh_ttl(transcription_id, ttl, total_diarization_segments)
         
         logger.info(
             f"[{transcription_id}] ✅ DISTRIBUTED DIARIZATION SEGMENT COMPLETED | "
@@ -1308,12 +1373,14 @@ def aggregate_segments_task(self, transcription_id: str):
         status = "transcribed" if enrichment_requested else "done"
         aggregation_time = round(time.time() - start_time, 2)
         
-        # Le temps réel de traitement est le temps écoulé depuis le début de l'orchestration
-        # (ou le max des segments + agrégation si pas de timestamp de début)
+        # ⚠️ IMPORTANT : Calculer uniquement le temps de traitement RÉEL (sans temps d'attente)
+        # Le temps réel est le temps écoulé depuis le début de l'orchestration (quand le worker a commencé)
+        # Cela exclut le temps d'attente dans la file Celery
         if orchestration_start_time:
-            total_processing_time = round(time.time() - orchestration_start_time, 2)
+            processing_end_time = time.time()
+            total_processing_time = round(processing_end_time - orchestration_start_time, 2)
         else:
-            # Fallback : max segment + agrégation
+            # Fallback : max segment + agrégation (approximation)
             total_processing_time = round(max_segment_time + aggregation_time, 2)
         
         api_client.update_transcription(transcription_id, {

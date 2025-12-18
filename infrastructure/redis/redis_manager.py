@@ -88,15 +88,44 @@ class RedisTranscriptionManager:
         """Incrémente atomiquement le compteur de segments complétés"""
         key = f"transcription:{transcription_id}:completed_count"
         count = int(self.client.incr(key))
+        # Le TTL sera renouvelé par refresh_ttl si nécessaire
         self.client.expire(key, 3600)
         return count
     
-    def reset_completed_count(self, transcription_id: str):
+    def refresh_ttl(self, transcription_id: str, ttl: int, total_segments: int = None):
+        """
+        Renouvelle le TTL de toutes les clés Redis associées à une transcription.
+        Utile pour éviter l'expiration pendant un traitement long.
+        
+        Args:
+            transcription_id: ID de la transcription
+            ttl: Nouveau TTL en secondes
+            total_segments: Nombre total de segments (optionnel, pour renouveler les résultats de segments)
+        """
+        pipe = self.client.pipeline()
+        
+        # Renouveler les métadonnées
+        pipe.expire(f"transcription:{transcription_id}:segments", ttl)
+        pipe.expire(f"transcription:{transcription_id}:completed_count", ttl)
+        pipe.expire(f"transcription:{transcription_id}:aggregation_lock", ttl)
+        pipe.expire(f"transcription:{transcription_id}:segment_tasks", ttl)
+        pipe.expire(f"transcription:{transcription_id}:diarization_completed_count", ttl)
+        pipe.expire(f"transcription:{transcription_id}:diarization_tasks", ttl)
+        
+        # Renouveler les résultats de segments si le nombre total est fourni
+        if total_segments is not None:
+            for i in range(total_segments):
+                pipe.expire(f"transcription:{transcription_id}:segment:{i}:result", ttl)
+                pipe.expire(f"transcription:{transcription_id}:diarization:{i}:result", ttl)
+        
+        pipe.execute()
+    
+    def reset_completed_count(self, transcription_id: str, ttl: int = 3600):
         """Réinitialise le compteur de segments complétés"""
         key = f"transcription:{transcription_id}:completed_count"
         self.client.delete(key)
         self.client.set(key, 0)
-        self.client.expire(key, 3600)
+        self.client.expire(key, ttl)
     
     def acquire_aggregation_lock(self, transcription_id: str, timeout: int = 300) -> bool:
         """Tente d'acquérir un verrou pour l'agrégation (évite les déclenchements multiples)"""
@@ -125,6 +154,7 @@ class RedisTranscriptionManager:
         """Incrémente atomiquement le compteur de segments de diarisation complétés"""
         key = f"transcription:{transcription_id}:diarization_completed_count"
         count = int(self.client.incr(key))
+        # Le TTL sera renouvelé par refresh_ttl si nécessaire
         self.client.expire(key, 3600)
         return count
     
