@@ -820,6 +820,9 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         # Stocker le résultat et incrémenter le compteur
         base_ttl = getattr(config, 'redis_transcription_ttl', 14400)
         redis_manager.store_segment_result(transcription_id, segment_index, result, base_ttl)
+        
+        # ⚠️ IMPORTANT : Incrémenter le compteur AVANT de calculer le TTL dynamique
+        # Cela garantit que completed_count est défini avant utilisation
         completed_count = redis_manager.increment_completed_count(transcription_id)
         
         # ⚠️ IMPORTANT : Calculer un TTL dynamique basé sur le temps restant estimé
@@ -827,7 +830,8 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         # Calculer après avoir incrémenté le compteur pour connaître le nombre de segments restants
         if 'orchestration_start_time' in metadata:
             elapsed_time = time.time() - metadata['orchestration_start_time']
-            remaining_segments = metadata.get('total_segments', 1) - completed_count
+            # completed_count inclut déjà le segment actuel, donc pas besoin de -1
+            remaining_segments = max(0, metadata.get('total_segments', 1) - completed_count)
             # Estimer le temps restant : temps moyen par segment * segments restants
             avg_time_per_segment = processing_time  # Utiliser le temps actuel comme estimation
             estimated_remaining_time = max(avg_time_per_segment * remaining_segments, 300)  # Minimum 5 min
@@ -983,6 +987,9 @@ def diarize_segment_task(self, transcription_id: str, segment_path: str, segment
         # Stocker le résultat et incrémenter le compteur
         base_ttl = getattr(config, 'redis_transcription_ttl', 14400)
         redis_manager.store_diarization_result(transcription_id, segment_index, result, base_ttl)
+        
+        # ⚠️ IMPORTANT : Incrémenter le compteur AVANT de calculer le TTL dynamique
+        # Cela garantit que completed_count est défini avant utilisation
         completed_count = redis_manager.increment_diarization_count(transcription_id)
         
         # ⚠️ IMPORTANT : Calculer un TTL dynamique basé sur le temps restant estimé
@@ -991,7 +998,8 @@ def diarize_segment_task(self, transcription_id: str, segment_path: str, segment
         total_diarization_segments = len(diarization_segment_paths) if diarization_segment_paths else 0
         if 'orchestration_start_time' in metadata and total_diarization_segments > 0:
             elapsed_time = time.time() - metadata['orchestration_start_time']
-            remaining_segments = total_diarization_segments - completed_count
+            # completed_count inclut déjà le segment actuel, donc pas besoin de -1
+            remaining_segments = max(0, total_diarization_segments - completed_count)
             avg_time_per_segment = processing_time
             estimated_remaining_time = max(avg_time_per_segment * remaining_segments, 300)
             dynamic_ttl = int(estimated_remaining_time + 3600)
