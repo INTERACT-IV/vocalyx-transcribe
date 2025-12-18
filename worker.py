@@ -319,7 +319,7 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         # ⚠️ IMPORTANT : Le statut "processing" indique que le worker a commencé le traitement réel
         # Le temps de traitement sera calculé à partir de maintenant
         # ✅ NOUVEAU : Enregistrer le temps de début réel du traitement
-        from datetime import datetime
+        # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
         processing_start_datetime = datetime.utcnow()
         
         api_client.update_transcription(transcription_id, {
@@ -370,13 +370,14 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         queue_wait_time = None
         if queued_at and processing_start_time_str:
             try:
-                from datetime import datetime
+                # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
                 queued_dt = datetime.fromisoformat(queued_at.replace('Z', '+00:00'))
                 start_dt = datetime.fromisoformat(processing_start_time_str.replace('Z', '+00:00'))
                 queue_wait_time = round((start_dt - queued_dt).total_seconds(), 2)
             except Exception as e:
                 logger.warning(f"[{transcription_id}] ⚠️ Failed to calculate queue_wait_time: {e}")
         
+        # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
         processing_end_datetime = datetime.utcnow()
         
         api_client.update_transcription(transcription_id, {
@@ -494,7 +495,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         whisper_model = transcription.get('whisper_model', 'small')
         
         # ✅ NOUVEAU : Enregistrer le temps de début réel de l'orchestration
-        from datetime import datetime
+        # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
         processing_start_datetime = datetime.utcnow()
         
         # Mettre à jour le statut
@@ -1498,13 +1499,14 @@ def aggregate_segments_task(self, transcription_id: str):
         queue_wait_time = None
         if queued_at and processing_start_time_str:
             try:
-                from datetime import datetime
+                # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
                 queued_dt = datetime.fromisoformat(queued_at.replace('Z', '+00:00'))
                 start_dt = datetime.fromisoformat(processing_start_time_str.replace('Z', '+00:00'))
                 queue_wait_time = round((start_dt - queued_dt).total_seconds(), 2)
             except Exception as e:
                 logger.warning(f"[{transcription_id}] ⚠️ Failed to calculate queue_wait_time: {e}")
         
+        # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
         processing_end_datetime = datetime.utcnow()
         
         api_client.update_transcription(transcription_id, {
