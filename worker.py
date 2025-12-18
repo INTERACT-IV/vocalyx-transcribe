@@ -817,13 +817,17 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
             "time_offset": time_offset
         }
         
-        # ⚠️ IMPORTANT : Renouveler le TTL des données Redis pendant le traitement
-        # Cela évite l'expiration si le traitement prend plus de temps que prévu
+        # Stocker le résultat et incrémenter le compteur
         base_ttl = getattr(config, 'redis_transcription_ttl', 14400)
-        # Calculer un TTL dynamique basé sur le temps restant estimé
+        redis_manager.store_segment_result(transcription_id, segment_index, result, base_ttl)
+        completed_count = redis_manager.increment_completed_count(transcription_id)
+        
+        # ⚠️ IMPORTANT : Calculer un TTL dynamique basé sur le temps restant estimé
+        # Cela évite l'expiration si le traitement prend plus de temps que prévu
+        # Calculer après avoir incrémenté le compteur pour connaître le nombre de segments restants
         if 'orchestration_start_time' in metadata:
             elapsed_time = time.time() - metadata['orchestration_start_time']
-            remaining_segments = metadata.get('total_segments', 1) - completed_count - 1
+            remaining_segments = metadata.get('total_segments', 1) - completed_count
             # Estimer le temps restant : temps moyen par segment * segments restants
             avg_time_per_segment = processing_time  # Utiliser le temps actuel comme estimation
             estimated_remaining_time = max(avg_time_per_segment * remaining_segments, 300)  # Minimum 5 min
@@ -832,9 +836,6 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
             ttl = max(base_ttl, dynamic_ttl)
         else:
             ttl = base_ttl
-        
-        redis_manager.store_segment_result(transcription_id, segment_index, result, ttl)
-        completed_count = redis_manager.increment_completed_count(transcription_id)
         
         # Mettre à jour les métadonnées avec TTL renouvelé
         metadata['completed_segments'] = completed_count
@@ -979,12 +980,18 @@ def diarize_segment_task(self, transcription_id: str, segment_path: str, segment
             "time_offset": time_offset
         }
         
-        # ⚠️ IMPORTANT : Renouveler le TTL des données Redis pendant le traitement
+        # Stocker le résultat et incrémenter le compteur
         base_ttl = getattr(config, 'redis_transcription_ttl', 14400)
-        # Utiliser le même TTL que pour les segments de transcription
-        if 'orchestration_start_time' in metadata:
+        redis_manager.store_diarization_result(transcription_id, segment_index, result, base_ttl)
+        completed_count = redis_manager.increment_diarization_count(transcription_id)
+        
+        # ⚠️ IMPORTANT : Calculer un TTL dynamique basé sur le temps restant estimé
+        # Calculer après avoir incrémenté le compteur pour connaître le nombre de segments restants
+        diarization_segment_paths = metadata.get('diarization_segment_paths', [])
+        total_diarization_segments = len(diarization_segment_paths) if diarization_segment_paths else 0
+        if 'orchestration_start_time' in metadata and total_diarization_segments > 0:
             elapsed_time = time.time() - metadata['orchestration_start_time']
-            remaining_segments = len(metadata.get('diarization_segment_paths', [])) - completed_count - 1
+            remaining_segments = total_diarization_segments - completed_count
             avg_time_per_segment = processing_time
             estimated_remaining_time = max(avg_time_per_segment * remaining_segments, 300)
             dynamic_ttl = int(estimated_remaining_time + 3600)
@@ -992,12 +999,7 @@ def diarize_segment_task(self, transcription_id: str, segment_path: str, segment
         else:
             ttl = base_ttl
         
-        redis_manager.store_diarization_result(transcription_id, segment_index, result, ttl)
-        completed_count = redis_manager.increment_diarization_count(transcription_id)
-        
         # ⚠️ IMPORTANT : Renouveler le TTL de toutes les clés Redis associées à cette transcription
-        diarization_segment_paths = metadata.get('diarization_segment_paths', [])
-        total_diarization_segments = len(diarization_segment_paths) if diarization_segment_paths else 0
         redis_manager.refresh_ttl(transcription_id, ttl, total_diarization_segments)
         
         logger.info(
