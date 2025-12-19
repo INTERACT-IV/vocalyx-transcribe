@@ -253,12 +253,14 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
                 if file_path_obj.exists():
                     import soundfile as sf
                     duration = sf.info(str(file_path_obj)).duration
-                    min_duration = 30  # Seuil par défaut
-                    use_distributed = duration > min_duration
+                    # Seuil configurable pour activer le mode distribué
+                    # 0 = désactiver le mode distribué (traitement classique uniquement)
+                    min_duration = config.distributed_min_duration_seconds
+                    use_distributed = min_duration > 0 and duration > min_duration
                     logger.info(
                         f"[{transcription_id}] 📊 DISTRIBUTION DECISION (worker) | "
                         f"Duration: {duration:.1f}s | "
-                        f"Threshold: {min_duration}s | "
+                        f"Threshold: {min_duration}s {'(distribué désactivé)' if min_duration == 0 else ''} | "
                         f"Mode: {'DISTRIBUTED' if use_distributed else 'CLASSIC'}"
                     )
         except Exception as e:

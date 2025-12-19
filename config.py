@@ -73,6 +73,7 @@ class Config:
             'best_of': '1',    # Pas de recherche multiple (optimisation CPU)
             'temperature': '0.0',
             'transcription_timeout': '300',  # Timeout de transcription en secondes (défaut: 5 minutes)
+            'distributed_min_duration_seconds': '30',  # Seuil pour activer le mode distribué
         }
         
         config['PATHS'] = {
@@ -221,6 +222,14 @@ class Config:
         self.transcription_timeout = int(os.environ.get(
             'TRANSCRIPTION_TIMEOUT',
             self.config.getint('PERFORMANCE', 'transcription_timeout', fallback=300)
+        ))
+        
+        # Seuil minimal (en secondes) pour activer le mode distribué
+        # 0 = désactiver le mode distribué (traitement classique uniquement)
+        # Peut être surchargé par variable d'environnement DISTRIBUTED_MIN_DURATION_SECONDS
+        self.distributed_min_duration_seconds = int(os.environ.get(
+            'DISTRIBUTED_MIN_DURATION_SECONDS',
+            self.config.getint('PERFORMANCE', 'distributed_min_duration_seconds', fallback=30)
         ))
         
         # PATHS

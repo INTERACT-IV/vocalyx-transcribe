@@ -105,6 +105,17 @@ temperature = 0.0
 # Augmenter si vous avez des fichiers très longs (> 30 minutes)
 transcription_timeout = 300
 
+# =========================================================================
+# MODE DISTRIBUÉ
+# =========================================================================
+
+# Durée minimale (en secondes) pour activer le mode distribué
+# Les fichiers audio plus longs que cette valeur seront automatiquement découpés
+# et distribués sur plusieurs workers pour traitement parallèle
+# 0 = désactiver le mode distribué (traitement classique uniquement)
+# Peut être surchargé par la variable d'environnement DISTRIBUTED_MIN_DURATION_SECONDS
+distributed_min_duration_seconds = 30
+
 [PATHS]
 # Répertoire partagé pour les uploads (DOIT être identique à vocalyx-api)
 upload_dir = /home/shinohk/code/vocalyx-all/shared/uploads
