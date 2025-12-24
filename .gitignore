@@ -216,4 +216,5 @@ tmp_uploads/
 
 transcriptions.db
 
-config.ini
+config.ini*.bk
+config.initest
