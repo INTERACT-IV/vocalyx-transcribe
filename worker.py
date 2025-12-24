@@ -312,8 +312,9 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         use_vad = transcription.get('vad_enabled', True)
         use_diarization = transcription.get('diarization_enabled', False)
         whisper_model = transcription.get('whisper_model', 'small')  # Récupérer le modèle choisi
+        language = transcription.get('language')  # Récupérer la langue choisie
         
-        logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad} | Diarization: {use_diarization} | Model: {whisper_model}")
+        logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad} | Diarization: {use_diarization} | Model: {whisper_model} | Language: {language}")
         
         # 2. Mettre à jour le statut à "processing" (début réel du traitement)
         # ⚠️ IMPORTANT : Le statut "processing" indique que le worker a commencé le traitement réel
@@ -341,7 +342,8 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
             file_path=file_path,
             use_vad=use_vad,
             use_diarization=use_diarization,
-            transcription_id=transcription_id
+            transcription_id=transcription_id,
+            language=language
         )
         
         logger.info(f"[{transcription_id}] ✅ Transcription service completed")
@@ -493,6 +495,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         
         use_vad = transcription.get('vad_enabled', True)
         whisper_model = transcription.get('whisper_model', 'small')
+        language = transcription.get('language')
         
         # ✅ NOUVEAU : Enregistrer le temps de début réel de l'orchestration
         # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
@@ -605,6 +608,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             "use_vad": use_vad,
             "use_diarization": use_diarization,
             "whisper_model": whisper_model,
+            "language": language,  # ✅ NOUVEAU
             "processed_path_mono": str(processed_path_mono),
             "processed_path_stereo": str(preprocessed.get('stereo')) if preprocessed.get('stereo') else None,
             "is_stereo": preprocessed.get('is_stereo', False),
@@ -808,11 +812,12 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
         use_vad = metadata.get('use_vad', True)
         whisper_model = metadata.get('whisper_model', 'small')
+        language = metadata.get('language')
         
         logger.info(
             f"[{transcription_id}] ⚙️ DISTRIBUTED SEGMENT | Worker {config.instance_name} processing | "
             f"Segment: {segment_index+1}/{total_segments} | "
-            f"Model: {whisper_model} | VAD: {use_vad}"
+            f"Model: {whisper_model} | VAD: {use_vad} | Language: {language}"
         )
         
         # Transcrit le segment
@@ -824,7 +829,8 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
         text, segments_list, lang = transcription_service.transcribe_segment(
             segment_path_obj,
-            use_vad=use_vad
+            use_vad=use_vad,
+            language=language
         )
         
         processing_time = round(time.time() - start_time, 2)

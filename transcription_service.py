@@ -92,7 +92,7 @@ class TranscriptionService:
             logger.warning(f"⚠️ Failed to initialize diarization service: {e} (will be skipped if requested)")
             self.diarization_service = None
         
-    def transcribe_segment(self, file_path: Path, use_vad: bool = True, retry_without_vad: bool = True) -> Tuple[str, List[Dict], str]:
+    def transcribe_segment(self, file_path: Path, use_vad: bool = True, retry_without_vad: bool = True, language: Optional[str] = None) -> Tuple[str, List[Dict], str]:
         """
         Transcrit un segment audio avec consommation progressive du générateur.
         """
@@ -105,7 +105,10 @@ class TranscriptionService:
         text_full = ""
         info = None # Initialiser info
         
-        logger.info(f"🎯 Starting Whisper transcription (VAD: {use_vad})...")
+        # Utiliser la langue fournie (override) ou celle de la config
+        target_language = language or self.config.language or None
+        
+        logger.info(f"🎯 Starting Whisper transcription (VAD: {use_vad}, Language: {target_language})...")
         
         try:
             vad_params = None
@@ -134,7 +137,7 @@ class TranscriptionService:
                         # Paramètres optimisés pour CPU
                         segments, info = self.model.transcribe(
                             str(file_path),
-                            language=self.config.language or None,
+                            language=target_language,
                             task="transcribe",
                             beam_size=self.config.beam_size,  # 1 pour CPU (greedy search)
                             best_of=getattr(self.config, 'best_of', self.config.beam_size),  # 1 pour CPU
@@ -209,7 +212,7 @@ class TranscriptionService:
             
             if use_vad and retry_without_vad:
                 logger.warning(f"⚠️ Retrying WITHOUT VAD...")
-                return self.transcribe_segment(file_path, use_vad=False, retry_without_vad=False)
+                return self.transcribe_segment(file_path, use_vad=False, retry_without_vad=False, language=language)
             else:
                 raise Exception(f"Transcription failed: {e}")
         
@@ -246,6 +249,12 @@ class TranscriptionService:
         segment_paths: List[Path], 
         use_vad: bool, 
         log_prefix: str
+    def _transcribe_sequential(
+        self, 
+        segment_paths: List[Path], 
+        use_vad: bool, 
+        log_prefix: str,
+        language: Optional[str] = None
     ) -> Tuple[List[Dict], str, Optional[str]]:
         """
         Transcrit plusieurs segments de manière séquentielle dans le processus Celery.
@@ -272,7 +281,7 @@ class TranscriptionService:
         time_offset = 0.0
         for i, segment_path in enumerate(segment_paths):
             try:
-                text, segments_list, lang = self.transcribe_segment(segment_path, use_vad)
+                text, segments_list, lang = self.transcribe_segment(segment_path, use_vad, language=language)
                 
                 # Ajuster les timestamps avec l'offset
                 for seg in segments_list:
@@ -300,7 +309,7 @@ class TranscriptionService:
         
         return full_segments, full_text.strip(), language_detected
     
-    def transcribe(self, file_path: str, use_vad: bool = True, use_diarization: bool = False, transcription_id: str = None) -> Dict:
+    def transcribe(self, file_path: str, use_vad: bool = True, use_diarization: bool = False, transcription_id: str = None, language: str = None) -> Dict:
         """
         Transcrit un fichier audio (point d'entrée principal).
         
@@ -321,7 +330,7 @@ class TranscriptionService:
         # Format des logs avec transcription_id si disponible
         log_prefix = f"[{transcription_id}] " if transcription_id else ""
         
-        logger.info(f"{log_prefix}📁 Processing file: {file_path.name} | VAD requested: {use_vad}")
+        logger.info(f"{log_prefix}📁 Processing file: {file_path.name} | VAD requested: {use_vad} | Language requested: {language}")
         
         # Charger le modèle Whisper en lazy loading
         if self.model is None:
@@ -372,12 +381,12 @@ class TranscriptionService:
             if len(segment_paths) > 1:
                 logger.info(f"{log_prefix}⚡ Sequential transcription: {len(segment_paths)} segments")
                 full_segments, full_text, language_detected = self._transcribe_sequential(
-                    segment_paths, use_vad, log_prefix
+                    segment_paths, use_vad, log_prefix, language=language
                 )
             else:
                 # Transcription séquentielle pour un seul segment (plus simple)
                 logger.info(f"{log_prefix}🎤 Transcribing single segment...")
-                text, segments_list, lang = self.transcribe_segment(segment_paths[0], use_vad=use_vad)
+                text, segments_list, lang = self.transcribe_segment(segment_paths[0], use_vad=use_vad, language=language)
                 
                 full_segments = segments_list
                 full_text = text
