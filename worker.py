@@ -339,11 +339,15 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         # 4. Exécuter la transcription
         logger.info(f"[{transcription_id}] 🎤 Starting transcription with Whisper...")
         
+        # Récupérer le prompt initial s'il existe
+        initial_prompt = transcription.get('initial_prompt')
+        
         result = transcription_service.transcribe(
             file_path=file_path,
             use_vad=use_vad,
             use_diarization=use_diarization,
-            transcription_id=transcription_id
+            transcription_id=transcription_id,
+            initial_prompt=initial_prompt
         )
         
         logger.info(f"[{transcription_id}] ✅ Transcription service completed")
