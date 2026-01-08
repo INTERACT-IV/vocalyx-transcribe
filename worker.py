@@ -341,6 +341,11 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         
         # Récupérer le prompt initial s'il existe
         initial_prompt = transcription.get('initial_prompt')
+        
+        # Normaliser le prompt : convertir les chaînes vides en None
+        if initial_prompt is not None and isinstance(initial_prompt, str) and initial_prompt.strip() == "":
+            initial_prompt = None
+        
         logger.info(f"[{transcription_id}] 🔍 Initial prompt: {initial_prompt if initial_prompt else '(none)'}")
         
         result = transcription_service.transcribe(
@@ -501,6 +506,18 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         use_vad = transcription.get('vad_enabled', True)
         whisper_model = transcription.get('whisper_model', 'small')
         initial_prompt = transcription.get('initial_prompt')
+        
+        # Debug: vérifier la valeur récupérée depuis l'API
+        logger.debug(
+            f"[{transcription_id}] 🔍 DEBUG | Transcription data from API | "
+            f"initial_prompt type: {type(initial_prompt)} | "
+            f"initial_prompt value: {repr(initial_prompt)} | "
+            f"transcription keys: {list(transcription.keys())}"
+        )
+        
+        # Normaliser le prompt : convertir les chaînes vides en None
+        if initial_prompt is not None and isinstance(initial_prompt, str) and initial_prompt.strip() == "":
+            initial_prompt = None
         
         logger.info(
             f"[{transcription_id}] 🔍 DISTRIBUTED ORCHESTRATION | Initial prompt: {initial_prompt if initial_prompt else '(none)'}"
@@ -822,6 +839,10 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         use_vad = metadata.get('use_vad', True)
         whisper_model = metadata.get('whisper_model', 'small')
         initial_prompt = metadata.get('initial_prompt')  # ✅ NOUVEAU : Récupérer l'initial_prompt depuis Redis
+        
+        # Normaliser le prompt : convertir les chaînes vides en None
+        if initial_prompt is not None and isinstance(initial_prompt, str) and initial_prompt.strip() == "":
+            initial_prompt = None
         
         logger.info(
             f"[{transcription_id}] ⚙️ DISTRIBUTED SEGMENT | Worker {config.instance_name} processing | "
