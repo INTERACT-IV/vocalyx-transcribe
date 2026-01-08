@@ -850,10 +850,22 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         # mais pas pour les segments suivants pour éviter les suppressions de texte.
         use_prompt_for_segment = initial_prompt if (segment_index == 0) else None
         
+        # ⚠️ IMPORTANT : Pour le premier segment (index 0) avec initial_prompt, désactiver le VAD
+        # pour garantir que tout le début du segment est transcrit. Le VAD peut être trop agressif
+        # et filtrer le début silencieux, ce qui empêcherait la transcription du début avec l'initial_prompt.
+        use_vad_for_segment = use_vad if (segment_index != 0 or not use_prompt_for_segment) else False
+        
+        if segment_index == 0 and use_prompt_for_segment and not use_vad_for_segment:
+            logger.info(
+                f"[{transcription_id}] 🔍 FIRST SEGMENT (index 0) | "
+                f"VAD disabled for first segment with initial_prompt to ensure complete transcription from start"
+            )
+        
         logger.info(
             f"[{transcription_id}] ⚙️ DISTRIBUTED SEGMENT | Worker {config.instance_name} processing | "
             f"Segment: {segment_index+1}/{total_segments} | "
-            f"Model: {whisper_model} | VAD: {use_vad} | Initial prompt: {use_prompt_for_segment if use_prompt_for_segment else '(none - using only for first segment)'}"
+            f"Model: {whisper_model} | VAD: {use_vad_for_segment} ({'disabled for first segment with prompt' if segment_index == 0 and use_prompt_for_segment and not use_vad_for_segment else 'normal'}) | "
+            f"Initial prompt: {use_prompt_for_segment if use_prompt_for_segment else '(none - using only for first segment)'}"
         )
         
         # Transcrit le segment
@@ -865,7 +877,7 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
         text, segments_list, lang = transcription_service.transcribe_segment(
             segment_path_obj,
-            use_vad=use_vad,
+            use_vad=use_vad_for_segment,  # ✅ Utiliser VAD conditionnel pour le premier segment
             initial_prompt=use_prompt_for_segment  # ✅ Utiliser le prompt uniquement pour le premier segment
         )
         
@@ -900,11 +912,23 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         # Ajuster les timestamps avec l'offset réel
         adjusted_segments = []
         for seg in segments_list:
+            adjusted_start = round(seg["start"] + time_offset, 2)
+            adjusted_end = round(seg["end"] + time_offset, 2)
             adjusted_segments.append({
-                "start": round(seg["start"] + time_offset, 2),
-                "end": round(seg["end"] + time_offset, 2),
+                "start": adjusted_start,
+                "end": adjusted_end,
                 "text": seg["text"]
             })
+        
+        # Log spécial pour le premier segment (index 0) avec initial_prompt
+        if segment_index == 0 and initial_prompt:
+            logger.info(
+                f"[{transcription_id}] 📍 FIRST SEGMENT (index 0) ADJUSTMENT | "
+                f"Time offset: {time_offset:.2f}s | "
+                f"Original segments: {len(segments_list)} | "
+                f"Original timestamps: {[(s['start'], s['end']) for s in segments_list[:3]]} | "
+                f"Adjusted timestamps: {[(s['start'], s['end']) for s in adjusted_segments[:3]]}"
+            )
         
         # Stocker le résultat dans Redis
         result = {
@@ -1399,11 +1423,14 @@ def aggregate_segments_task(self, transcription_id: str):
             
             # Log spécial pour le premier segment (index 0) qui utilise l'initial_prompt
             if i == 0:
+                first_segment_timestamps = [(s.get('start', 0), s.get('end', 0)) for s in result.get('segments', [])[:3]]
                 logger.info(
                     f"[{transcription_id}] 📍 FIRST SEGMENT (index 0) | "
                     f"Segments: {segments_count} | "
                     f"Text length: {len(segment_text)} chars | "
-                    f"Has text: {bool(segment_text)}"
+                    f"Has text: {bool(segment_text)} | "
+                    f"Time offset: {result.get('time_offset', 0):.2f}s | "
+                    f"First 3 timestamps: {first_segment_timestamps}"
                 )
             
             all_segments.extend(result['segments'])
