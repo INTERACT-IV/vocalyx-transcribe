@@ -245,10 +245,26 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
     
     file_path = transcription.get('file_path')
     
+    # Vérifier si un initial_prompt est fourni
+    initial_prompt = transcription.get('initial_prompt')
+    # Normaliser le prompt : convertir les chaînes vides en None
+    if initial_prompt is not None and isinstance(initial_prompt, str) and initial_prompt.strip() == "":
+        initial_prompt = None
+    has_initial_prompt = initial_prompt is not None and initial_prompt.strip() != ""
+    
     # Vérifier si on doit utiliser le mode distribué
     if use_distributed is None:
         try:
-            if file_path:
+            # ⚠️ IMPORTANT : Si un initial_prompt est fourni, forcer le mode classique (non distribué)
+            # Le prompt initial doit être appliqué à l'audio complet, pas à un segment
+            if has_initial_prompt:
+                logger.info(
+                    f"[{transcription_id}] 📊 DISTRIBUTION DECISION (worker) | "
+                    f"Initial prompt provided → Forcing CLASSIC mode (non-distributed) | "
+                    f"Reason: initial_prompt must be applied to full audio, not segments"
+                )
+                use_distributed = False
+            elif file_path:
                 file_path_obj = Path(file_path)
                 if file_path_obj.exists():
                     import soundfile as sf
@@ -339,13 +355,7 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         # 4. Exécuter la transcription
         logger.info(f"[{transcription_id}] 🎤 Starting transcription with Whisper...")
         
-        # Récupérer le prompt initial s'il existe
-        initial_prompt = transcription.get('initial_prompt')
-        
-        # Normaliser le prompt : convertir les chaînes vides en None
-        if initial_prompt is not None and isinstance(initial_prompt, str) and initial_prompt.strip() == "":
-            initial_prompt = None
-        
+        # initial_prompt a déjà été récupéré et normalisé plus tôt (ligne ~249)
         logger.info(f"[{transcription_id}] 🔍 Initial prompt: {initial_prompt if initial_prompt else '(none)'}")
         
         result = transcription_service.transcribe(
@@ -850,22 +860,10 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         # mais pas pour les segments suivants pour éviter les suppressions de texte.
         use_prompt_for_segment = initial_prompt if (segment_index == 0) else None
         
-        # ⚠️ IMPORTANT : Pour le premier segment (index 0) avec initial_prompt, désactiver le VAD
-        # pour garantir que tout le début du segment est transcrit. Le VAD peut être trop agressif
-        # et filtrer le début silencieux, ce qui empêcherait la transcription du début avec l'initial_prompt.
-        use_vad_for_segment = use_vad if (segment_index != 0 or not use_prompt_for_segment) else False
-        
-        if segment_index == 0 and use_prompt_for_segment and not use_vad_for_segment:
-            logger.info(
-                f"[{transcription_id}] 🔍 FIRST SEGMENT (index 0) | "
-                f"VAD disabled for first segment with initial_prompt to ensure complete transcription from start"
-            )
-        
         logger.info(
             f"[{transcription_id}] ⚙️ DISTRIBUTED SEGMENT | Worker {config.instance_name} processing | "
             f"Segment: {segment_index+1}/{total_segments} | "
-            f"Model: {whisper_model} | VAD: {use_vad_for_segment} ({'disabled for first segment with prompt' if segment_index == 0 and use_prompt_for_segment and not use_vad_for_segment else 'normal'}) | "
-            f"Initial prompt: {use_prompt_for_segment if use_prompt_for_segment else '(none - using only for first segment)'}"
+            f"Model: {whisper_model} | VAD: {use_vad} | Initial prompt: {use_prompt_for_segment if use_prompt_for_segment else '(none - using only for first segment)'}"
         )
         
         # Transcrit le segment
@@ -877,7 +875,7 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
         text, segments_list, lang = transcription_service.transcribe_segment(
             segment_path_obj,
-            use_vad=use_vad_for_segment,  # ✅ Utiliser VAD conditionnel pour le premier segment
+            use_vad=use_vad,
             initial_prompt=use_prompt_for_segment  # ✅ Utiliser le prompt uniquement pour le premier segment
         )
         
@@ -912,23 +910,11 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         # Ajuster les timestamps avec l'offset réel
         adjusted_segments = []
         for seg in segments_list:
-            adjusted_start = round(seg["start"] + time_offset, 2)
-            adjusted_end = round(seg["end"] + time_offset, 2)
             adjusted_segments.append({
-                "start": adjusted_start,
-                "end": adjusted_end,
+                "start": round(seg["start"] + time_offset, 2),
+                "end": round(seg["end"] + time_offset, 2),
                 "text": seg["text"]
             })
-        
-        # Log spécial pour le premier segment (index 0) avec initial_prompt
-        if segment_index == 0 and initial_prompt:
-            logger.info(
-                f"[{transcription_id}] 📍 FIRST SEGMENT (index 0) ADJUSTMENT | "
-                f"Time offset: {time_offset:.2f}s | "
-                f"Original segments: {len(segments_list)} | "
-                f"Original timestamps: {[(s['start'], s['end']) for s in segments_list[:3]]} | "
-                f"Adjusted timestamps: {[(s['start'], s['end']) for s in adjusted_segments[:3]]}"
-            )
         
         # Stocker le résultat dans Redis
         result = {
@@ -1252,10 +1238,6 @@ def aggregate_segments_task(self, transcription_id: str):
         Amélioration : Compare tous les segments entre eux, pas seulement early vs later,
         pour mieux détecter les artefacts qui commencent presque en même temps.
         
-        ⚠️ IMPORTANT : Les segments qui commencent exactement à 0.0 (ou très proche, < 0.1s)
-        sont protégés et ne seront PAS supprimés, car ce sont généralement des segments légitimes
-        du début de l'audio (surtout avec initial_prompt qui n'est utilisé que sur le premier segment).
-        
         Args:
             segments: Liste de segments
             early_segment_threshold: Seuil en secondes. Les segments qui commencent avant ce seuil
@@ -1270,9 +1252,6 @@ def aggregate_segments_task(self, transcription_id: str):
         """
         if not segments:
             return segments
-        
-        # Seuil de protection pour le premier segment légitime (généralement à 0.0)
-        FIRST_SEGMENT_PROTECTION_THRESHOLD = 0.1
         
         # Trier par start
         sorted_segments = sorted(segments, key=lambda x: x.get('start', 0))
@@ -1293,12 +1272,6 @@ def aggregate_segments_task(self, transcription_id: str):
             if early_duration <= 0:
                 continue
             
-            # ⚠️ PROTECTION : Ne jamais supprimer un segment qui commence à 0.0 (ou très proche)
-            # Ce sont généralement des segments légitimes du début, surtout avec initial_prompt
-            if early_start < FIRST_SEGMENT_PROTECTION_THRESHOLD:
-                # Segment protégé : ne pas le supprimer
-                continue
-            
             # Comparer avec tous les autres segments (y compris ceux qui commencent aussi tôt)
             for j, other_seg in enumerate(sorted_segments):
                 if i == j or other_seg in segments_to_remove:
@@ -1309,11 +1282,6 @@ def aggregate_segments_task(self, transcription_id: str):
                 other_duration = other_end - other_start
                 
                 if other_duration <= 0:
-                    continue
-                
-                # ⚠️ PROTECTION : Ne jamais supprimer un segment protégé même s'il chevauche
-                if other_start < FIRST_SEGMENT_PROTECTION_THRESHOLD:
-                    # L'autre segment est protégé : ne pas supprimer early_seg en faveur de lui
                     continue
                 
                 # Calculer le chevauchement
@@ -1418,21 +1386,6 @@ def aggregate_segments_task(self, transcription_id: str):
             if not result:
                 raise ValueError(f"Result not found for segment {i} of transcription {transcription_id}")
             
-            segments_count = len(result.get('segments', []))
-            segment_text = result.get('text', '').strip()
-            
-            # Log spécial pour le premier segment (index 0) qui utilise l'initial_prompt
-            if i == 0:
-                first_segment_timestamps = [(s.get('start', 0), s.get('end', 0)) for s in result.get('segments', [])[:3]]
-                logger.info(
-                    f"[{transcription_id}] 📍 FIRST SEGMENT (index 0) | "
-                    f"Segments: {segments_count} | "
-                    f"Text length: {len(segment_text)} chars | "
-                    f"Has text: {bool(segment_text)} | "
-                    f"Time offset: {result.get('time_offset', 0):.2f}s | "
-                    f"First 3 timestamps: {first_segment_timestamps}"
-                )
-            
             all_segments.extend(result['segments'])
             full_text += result['text'] + " "
             segment_time = result.get('processing_time', 0.0)
@@ -1461,30 +1414,13 @@ def aggregate_segments_task(self, transcription_id: str):
         # et qui se chevauchent significativement avec d'autres segments
         # Cette approche compare tous les segments entre eux pour mieux détecter les doublons
         original_count = len(all_segments)
-        
-        # Compter les segments qui commencent à 0.0 (ou très proche) avant filtrage
-        segments_at_start_before = [seg for seg in all_segments if seg.get('start', 0) < 0.1]
-        
         all_segments = filter_overlapping_segments(all_segments, early_segment_threshold=2.0, overlap_threshold=0.5, start_window=0.5)
         filtered_count = len(all_segments)
-        
-        # Compter les segments qui commencent à 0.0 (ou très proche) après filtrage
-        segments_at_start_after = [seg for seg in all_segments if seg.get('start', 0) < 0.1]
-        
         if original_count != filtered_count:
             logger.info(
                 f"[{transcription_id}] 🔍 DISTRIBUTED AGGREGATION | Filtered overlapping segments | "
-                f"Before: {original_count} | After: {filtered_count} | Removed: {original_count - filtered_count} | "
-                f"Segments at start (<0.1s) before: {len(segments_at_start_before)} | after: {len(segments_at_start_after)}"
+                f"Before: {original_count} | After: {filtered_count} | Removed: {original_count - filtered_count}"
             )
-            
-            # Avertissement si des segments du début ont été supprimés
-            if len(segments_at_start_before) > len(segments_at_start_after):
-                logger.warning(
-                    f"[{transcription_id}] ⚠️ WARNING | Segments at start (<0.1s) were filtered | "
-                    f"Before: {len(segments_at_start_before)} | After: {len(segments_at_start_after)} | "
-                    f"This might indicate that the first segment (with initial_prompt) was incorrectly filtered!"
-                )
         
         # Trier les segments par ordre chronologique (start, puis end)
         # ⚠️ IMPORTANT: Utiliser start comme critère principal garantit un ordre chronologique correct
