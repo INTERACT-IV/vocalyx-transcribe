@@ -111,7 +111,7 @@ class TranscriptionService:
         text_full = ""
         info = None # Initialiser info
         
-        logger.info(f"🎯 Starting Whisper transcription (VAD: {use_vad})...")
+        logger.info(f"🎯 Starting Whisper transcription (VAD: {use_vad}, initial_prompt: {initial_prompt if initial_prompt else '(none)'})...")
         
         try:
             vad_params = None
@@ -330,7 +330,7 @@ class TranscriptionService:
         # Format des logs avec transcription_id si disponible
         log_prefix = f"[{transcription_id}] " if transcription_id else ""
         
-        logger.info(f"{log_prefix}📁 Processing file: {file_path.name} | VAD requested: {use_vad}")
+        logger.info(f"{log_prefix}📁 Processing file: {file_path.name} | VAD: {use_vad} | Initial prompt: {initial_prompt if initial_prompt else '(none)'}")
         
         # Charger le modèle Whisper en lazy loading
         if self.model is None:

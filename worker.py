@@ -341,6 +341,7 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         
         # Récupérer le prompt initial s'il existe
         initial_prompt = transcription.get('initial_prompt')
+        logger.info(f"[{transcription_id}] 🔍 Initial prompt: {initial_prompt if initial_prompt else '(none)'}")
         
         result = transcription_service.transcribe(
             file_path=file_path,
@@ -499,6 +500,11 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         
         use_vad = transcription.get('vad_enabled', True)
         whisper_model = transcription.get('whisper_model', 'small')
+        initial_prompt = transcription.get('initial_prompt')
+        
+        logger.info(
+            f"[{transcription_id}] 🔍 DISTRIBUTED ORCHESTRATION | Initial prompt: {initial_prompt if initial_prompt else '(none)'}"
+        )
         
         # ✅ NOUVEAU : Enregistrer le temps de début réel de l'orchestration
         # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
@@ -611,6 +617,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             "use_vad": use_vad,
             "use_diarization": use_diarization,
             "whisper_model": whisper_model,
+            "initial_prompt": initial_prompt,  # ✅ NOUVEAU : Stocker l'initial_prompt pour tous les segments
             "processed_path_mono": str(processed_path_mono),
             "processed_path_stereo": str(preprocessed.get('stereo')) if preprocessed.get('stereo') else None,
             "is_stereo": preprocessed.get('is_stereo', False),
@@ -814,11 +821,12 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
         use_vad = metadata.get('use_vad', True)
         whisper_model = metadata.get('whisper_model', 'small')
+        initial_prompt = metadata.get('initial_prompt')  # ✅ NOUVEAU : Récupérer l'initial_prompt depuis Redis
         
         logger.info(
             f"[{transcription_id}] ⚙️ DISTRIBUTED SEGMENT | Worker {config.instance_name} processing | "
             f"Segment: {segment_index+1}/{total_segments} | "
-            f"Model: {whisper_model} | VAD: {use_vad}"
+            f"Model: {whisper_model} | VAD: {use_vad} | Initial prompt: {initial_prompt if initial_prompt else '(none)'}"
         )
         
         # Transcrit le segment
@@ -830,7 +838,8 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
         text, segments_list, lang = transcription_service.transcribe_segment(
             segment_path_obj,
-            use_vad=use_vad
+            use_vad=use_vad,
+            initial_prompt=initial_prompt  # ✅ NOUVEAU : Passer l'initial_prompt à Whisper
         )
         
         processing_time = round(time.time() - start_time, 2)
