@@ -1228,6 +1228,10 @@ def aggregate_segments_task(self, transcription_id: str):
         Amélioration : Compare tous les segments entre eux, pas seulement early vs later,
         pour mieux détecter les artefacts qui commencent presque en même temps.
         
+        ⚠️ IMPORTANT : Les segments qui commencent exactement à 0.0 (ou très proche, < 0.1s)
+        sont protégés et ne seront PAS supprimés, car ce sont généralement des segments légitimes
+        du début de l'audio (surtout avec initial_prompt qui n'est utilisé que sur le premier segment).
+        
         Args:
             segments: Liste de segments
             early_segment_threshold: Seuil en secondes. Les segments qui commencent avant ce seuil
@@ -1242,6 +1246,9 @@ def aggregate_segments_task(self, transcription_id: str):
         """
         if not segments:
             return segments
+        
+        # Seuil de protection pour le premier segment légitime (généralement à 0.0)
+        FIRST_SEGMENT_PROTECTION_THRESHOLD = 0.1
         
         # Trier par start
         sorted_segments = sorted(segments, key=lambda x: x.get('start', 0))
@@ -1262,6 +1269,12 @@ def aggregate_segments_task(self, transcription_id: str):
             if early_duration <= 0:
                 continue
             
+            # ⚠️ PROTECTION : Ne jamais supprimer un segment qui commence à 0.0 (ou très proche)
+            # Ce sont généralement des segments légitimes du début, surtout avec initial_prompt
+            if early_start < FIRST_SEGMENT_PROTECTION_THRESHOLD:
+                # Segment protégé : ne pas le supprimer
+                continue
+            
             # Comparer avec tous les autres segments (y compris ceux qui commencent aussi tôt)
             for j, other_seg in enumerate(sorted_segments):
                 if i == j or other_seg in segments_to_remove:
@@ -1272,6 +1285,11 @@ def aggregate_segments_task(self, transcription_id: str):
                 other_duration = other_end - other_start
                 
                 if other_duration <= 0:
+                    continue
+                
+                # ⚠️ PROTECTION : Ne jamais supprimer un segment protégé même s'il chevauche
+                if other_start < FIRST_SEGMENT_PROTECTION_THRESHOLD:
+                    # L'autre segment est protégé : ne pas supprimer early_seg en faveur de lui
                     continue
                 
                 # Calculer le chevauchement
@@ -1376,6 +1394,18 @@ def aggregate_segments_task(self, transcription_id: str):
             if not result:
                 raise ValueError(f"Result not found for segment {i} of transcription {transcription_id}")
             
+            segments_count = len(result.get('segments', []))
+            segment_text = result.get('text', '').strip()
+            
+            # Log spécial pour le premier segment (index 0) qui utilise l'initial_prompt
+            if i == 0:
+                logger.info(
+                    f"[{transcription_id}] 📍 FIRST SEGMENT (index 0) | "
+                    f"Segments: {segments_count} | "
+                    f"Text length: {len(segment_text)} chars | "
+                    f"Has text: {bool(segment_text)}"
+                )
+            
             all_segments.extend(result['segments'])
             full_text += result['text'] + " "
             segment_time = result.get('processing_time', 0.0)
@@ -1404,13 +1434,30 @@ def aggregate_segments_task(self, transcription_id: str):
         # et qui se chevauchent significativement avec d'autres segments
         # Cette approche compare tous les segments entre eux pour mieux détecter les doublons
         original_count = len(all_segments)
+        
+        # Compter les segments qui commencent à 0.0 (ou très proche) avant filtrage
+        segments_at_start_before = [seg for seg in all_segments if seg.get('start', 0) < 0.1]
+        
         all_segments = filter_overlapping_segments(all_segments, early_segment_threshold=2.0, overlap_threshold=0.5, start_window=0.5)
         filtered_count = len(all_segments)
+        
+        # Compter les segments qui commencent à 0.0 (ou très proche) après filtrage
+        segments_at_start_after = [seg for seg in all_segments if seg.get('start', 0) < 0.1]
+        
         if original_count != filtered_count:
             logger.info(
                 f"[{transcription_id}] 🔍 DISTRIBUTED AGGREGATION | Filtered overlapping segments | "
-                f"Before: {original_count} | After: {filtered_count} | Removed: {original_count - filtered_count}"
+                f"Before: {original_count} | After: {filtered_count} | Removed: {original_count - filtered_count} | "
+                f"Segments at start (<0.1s) before: {len(segments_at_start_before)} | after: {len(segments_at_start_after)}"
             )
+            
+            # Avertissement si des segments du début ont été supprimés
+            if len(segments_at_start_before) > len(segments_at_start_after):
+                logger.warning(
+                    f"[{transcription_id}] ⚠️ WARNING | Segments at start (<0.1s) were filtered | "
+                    f"Before: {len(segments_at_start_before)} | After: {len(segments_at_start_after)} | "
+                    f"This might indicate that the first segment (with initial_prompt) was incorrectly filtered!"
+                )
         
         # Trier les segments par ordre chronologique (start, puis end)
         # ⚠️ IMPORTANT: Utiliser start comme critère principal garantit un ordre chronologique correct
