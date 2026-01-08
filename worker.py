@@ -844,10 +844,16 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         if initial_prompt is not None and isinstance(initial_prompt, str) and initial_prompt.strip() == "":
             initial_prompt = None
         
+        # ⚠️ IMPORTANT : Dans la transcription distribuée, le prompt initial peut causer des suppressions de texte
+        # car chaque segment est traité indépendamment. Le prompt initial de Whisper est conçu pour l'audio complet.
+        # On utilise le prompt uniquement pour le premier segment (segment_index == 0) pour guider le contexte général,
+        # mais pas pour les segments suivants pour éviter les suppressions de texte.
+        use_prompt_for_segment = initial_prompt if (segment_index == 0) else None
+        
         logger.info(
             f"[{transcription_id}] ⚙️ DISTRIBUTED SEGMENT | Worker {config.instance_name} processing | "
             f"Segment: {segment_index+1}/{total_segments} | "
-            f"Model: {whisper_model} | VAD: {use_vad} | Initial prompt: {initial_prompt if initial_prompt else '(none)'}"
+            f"Model: {whisper_model} | VAD: {use_vad} | Initial prompt: {use_prompt_for_segment if use_prompt_for_segment else '(none - using only for first segment)'}"
         )
         
         # Transcrit le segment
@@ -860,7 +866,7 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         text, segments_list, lang = transcription_service.transcribe_segment(
             segment_path_obj,
             use_vad=use_vad,
-            initial_prompt=initial_prompt  # ✅ NOUVEAU : Passer l'initial_prompt à Whisper
+            initial_prompt=use_prompt_for_segment  # ✅ Utiliser le prompt uniquement pour le premier segment
         )
         
         processing_time = round(time.time() - start_time, 2)
