@@ -348,7 +348,14 @@ class TranscriptionService:
         # Format des logs avec transcription_id si disponible
         log_prefix = f"[{transcription_id}] " if transcription_id else ""
         
-        logger.info(f"{log_prefix}📁 Processing file: {file_path.name} | VAD: {use_vad} | Initial prompt: {initial_prompt if initial_prompt else '(none)'}")
+        # ⚠️ IMPORTANT : Si un initial_prompt est fourni, désactiver le VAD pour préserver le début de l'audio
+        # Le VAD peut filtrer le début même s'il contient de la parole, surtout avec un prompt initial
+        use_vad_effective = use_vad
+        if initial_prompt:
+            use_vad_effective = False
+            logger.info(f"{log_prefix}🔍 VAD disabled because initial_prompt is provided (to preserve audio start)")
+        
+        logger.info(f"{log_prefix}📁 Processing file: {file_path.name} | VAD: {use_vad_effective} | Initial prompt: {initial_prompt if initial_prompt else '(none)'}")
         
         # Charger le modèle Whisper en lazy loading
         if self.model is None:
@@ -396,7 +403,7 @@ class TranscriptionService:
             logger.info(f"{log_prefix}🎤 Transcribing full audio file...")
             text, segments_list, lang = self.transcribe_segment(
                 processed_path_mono, 
-                use_vad=use_vad, 
+                use_vad=use_vad_effective,  # Utiliser use_vad_effective (VAD désactivé si initial_prompt)
                 initial_prompt=initial_prompt, 
                 padding_offset=padding_offset
             )
