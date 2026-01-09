@@ -397,7 +397,12 @@ class TranscriptionService:
             else:
                 # Transcription séquentielle pour un seul segment (plus simple)
                 logger.info(f"{log_prefix}🎤 Transcribing single segment...")
-                text, segments_list, lang = self.transcribe_segment(segment_paths[0], use_vad=use_vad, initial_prompt=initial_prompt)
+                # ⚠️ IMPORTANT : Si initial_prompt est fourni, désactiver le VAD pour garantir la transcription complète
+                # Le VAD peut être trop agressif et filtrer le début, même avec un prompt
+                use_vad_for_transcription = use_vad if not initial_prompt else False
+                if initial_prompt and not use_vad_for_transcription:
+                    logger.info(f"{log_prefix}🔍 VAD disabled for transcription with initial_prompt to ensure complete transcription from start")
+                text, segments_list, lang = self.transcribe_segment(segment_paths[0], use_vad=use_vad_for_transcription, initial_prompt=initial_prompt)
                 
                 full_segments = segments_list
                 full_text = text
