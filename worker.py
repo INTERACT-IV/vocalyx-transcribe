@@ -308,7 +308,65 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
                 "mode": "distributed"
             }
     
-    # MODE CLASSIQUE : Traitement direct
+    # MODE CLASSIQUE : Déléguer à la fonction dédiée
+    try:
+        return self._transcribe_classic_mode(
+            transcription_id=transcription_id,
+            transcription=transcription,
+            file_path=file_path,
+            initial_prompt=initial_prompt,
+            api_client=api_client
+        )
+    except Exception as e:
+        logger.error(f"[{transcription_id}] ❌ Error in transcribe_audio_task: {e}", exc_info=True)
+        # Mettre à jour le statut à "error"
+        try:
+            api_client_on_error = get_api_client()
+            api_client_on_error.update_transcription(transcription_id, {
+                "status": "error",
+                "error_message": str(e)
+            })
+        except Exception as update_error:
+            logger.error(f"[{transcription_id}] Failed to update error status: {update_error}")
+        
+        # Retry si possible
+        if self.request.retries < self.max_retries:
+            logger.warning(f"[{transcription_id}] ⏳ Retrying in {self.default_retry_delay}s...")
+            raise self.retry(exc=e)
+        
+        # Si toutes les tentatives échouent
+        logger.error(f"[{transcription_id}] ⛔ All retries exhausted")
+        
+        # Supprimer le fichier .wav original même en cas d'échec
+        if file_path:
+            try:
+                file_path_obj = Path(file_path)
+                if file_path_obj.exists() and file_path_obj.suffix.lower() == '.wav':
+                    file_path_obj.unlink()
+                    logger.info(f"[{transcription_id}] 🗑️ Original audio file deleted after error: {file_path}")
+                elif file_path_obj.exists():
+                    logger.debug(f"[{transcription_id}] ℹ️ File not deleted (not .wav): {file_path}")
+            except Exception as delete_error:
+                logger.warning(f"[{transcription_id}] ⚠️ Failed to delete original audio file after error: {delete_error}")
+        
+        return {
+            "status": "error",
+            "transcription_id": transcription_id,
+            "error": str(e)
+        }
+
+def _transcribe_classic_mode(self, transcription_id: str, transcription: dict, file_path: str, initial_prompt, api_client):
+    """
+    Traite la transcription en mode classique (non-distribué).
+    Un seul worker traite l'audio complet de manière séquentielle.
+    
+    Args:
+        transcription_id: ID de la transcription
+        transcription: Données de la transcription depuis l'API
+        file_path: Chemin vers le fichier audio
+        initial_prompt: Prompt initial pour guider Whisper (optionnel)
+        api_client: Client API pour mettre à jour la transcription
+    """
     logger.info(
         f"[{transcription_id}] 🎯 CLASSIC MODE STARTED | "
         f"Worker: {config.instance_name} | "
@@ -349,7 +407,7 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         # 4. Exécuter la transcription
         logger.info(f"[{transcription_id}] 🎤 Starting transcription with Whisper...")
         
-        # initial_prompt a déjà été récupéré et normalisé plus tôt (ligne ~249)
+        # initial_prompt a déjà été récupéré et normalisé plus tôt
         logger.info(f"[{transcription_id}] 🔍 Initial prompt: {initial_prompt if initial_prompt else '(none)'}")
         
         result = transcription_service.transcribe(
@@ -436,43 +494,9 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
         }
         
     except Exception as e:
-        logger.error(f"[{transcription_id}] ❌ Error: {e}", exc_info=True)
-        
-        # Mettre à jour le statut à "error"
-        try:
-            api_client_on_error = get_api_client()
-            api_client_on_error.update_transcription(transcription_id, {
-                "status": "error",
-                "error_message": str(e)
-            })
-        except Exception as update_error:
-            logger.error(f"[{transcription_id}] Failed to update error status: {update_error}")
-        
-        # Retry si possible
-        if self.request.retries < self.max_retries:
-            logger.warning(f"[{transcription_id}] ⏳ Retrying in {self.default_retry_delay}s...")
-            raise self.retry(exc=e)
-        
-        # Si toutes les tentatives échouent
-        logger.error(f"[{transcription_id}] ⛔ All retries exhausted")
-        
-        # Supprimer le fichier .wav original même en cas d'échec
-        if file_path:
-            try:
-                file_path_obj = Path(file_path)
-                if file_path_obj.exists() and file_path_obj.suffix.lower() == '.wav':
-                    file_path_obj.unlink()
-                    logger.info(f"[{transcription_id}] 🗑️ Original audio file deleted after error: {file_path}")
-                elif file_path_obj.exists():
-                    logger.debug(f"[{transcription_id}] ℹ️ File not deleted (not .wav): {file_path}")
-            except Exception as delete_error:
-                logger.warning(f"[{transcription_id}] ⚠️ Failed to delete original audio file after error: {delete_error}")
-        
-        return {
-            "status": "error",
-            "transcription_id": transcription_id,
-            "error": str(e)
-        }
+        logger.error(f"[{transcription_id}] ❌ Error in classic mode: {e}", exc_info=True)
+        raise
+
 
 @celery_app.task(
     bind=True,
