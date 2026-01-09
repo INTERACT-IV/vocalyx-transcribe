@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple, Optional
 from faster_whisper import WhisperModel
 from audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
 from stereo_diarization import StereoDiarizationService
+from pydub import AudioSegment
 
 # Imports non utilisés (TimeoutError, signal, contextmanager) supprimés
 logger = logging.getLogger("vocalyx")
@@ -393,7 +394,25 @@ class TranscriptionService:
             # ⚠️ IMPORTANT : En mode classique (non-distribué), on traite toujours le fichier audio complet
             # La segmentation est uniquement utilisée en mode distribué
             logger.info(f"{log_prefix}🎤 CLASSIC MODE: Processing full audio file without segmentation")
-            padding_offset = 0.0  # Offset pour compenser le padding de silence (non utilisé en mode classique)
+            
+            # ⚠️ IMPORTANT : Si un initial_prompt est fourni, ajouter un padding de silence au début
+            # pour forcer Whisper à traiter le début même s'il est silencieux
+            padding_offset = 0.0
+            final_audio_path = processed_path_mono
+            if initial_prompt:
+                try:
+                    audio = AudioSegment.from_file(str(processed_path_mono))
+                    # Ajouter 10 secondes de silence au début (16kHz mono) - padding généreux
+                    # Cela force Whisper à traiter le début même s'il est silencieux
+                    silence = AudioSegment.silent(duration=10000, frame_rate=16000)
+                    audio_with_padding = silence + audio
+                    padded_path = processed_path_mono.parent / f"{processed_path_mono.stem}_padded.wav"
+                    audio_with_padding.export(str(padded_path), format="wav")
+                    final_audio_path = padded_path
+                    padding_offset = 10.0  # 10 secondes de padding à compenser
+                    logger.info(f"{log_prefix}🔍 Added 10s silence padding at start to force Whisper to process beginning (will adjust timestamps by -10s)")
+                except Exception as e:
+                    logger.warning(f"{log_prefix}⚠️ Could not add silence padding: {e}, using original audio")
             
             # 4. Transcription du fichier audio complet
             full_text = ""
@@ -402,7 +421,7 @@ class TranscriptionService:
             
             logger.info(f"{log_prefix}🎤 Transcribing full audio file...")
             text, segments_list, lang = self.transcribe_segment(
-                processed_path_mono, 
+                final_audio_path,  # Utiliser le fichier avec padding si nécessaire
                 use_vad=use_vad_effective,  # Utiliser use_vad_effective (VAD désactivé si initial_prompt)
                 initial_prompt=initial_prompt, 
                 padding_offset=padding_offset
@@ -474,8 +493,13 @@ class TranscriptionService:
                         processed_path_stereo.unlink()
                 
                 # Nettoyer les segments (si segmentation avait été faite)
-                # En mode classique, pas de segments à nettoyer car on traite le fichier complet
-                # Pas de nettoyage de segments nécessaire en mode classique
+                # En mode classique, nettoyer le fichier avec padding si créé
+                if 'final_audio_path' in locals() and final_audio_path != processed_path_mono and final_audio_path.exists():
+                    try:
+                        final_audio_path.unlink()
+                        logger.debug(f"{log_prefix}🧹 Temporary padded audio file deleted")
+                    except Exception as e:
+                        logger.warning(f"{log_prefix}⚠️ Failed to delete padded audio file: {e}")
                 
                 log_prefix = f"[{transcription_id}] " if transcription_id else ""
                 logger.debug(f"{log_prefix}🧹 Temporary files cleaned")
