@@ -280,7 +280,10 @@ class TranscriptionService:
         time_offset = 0.0
         for i, segment_path in enumerate(segment_paths):
             try:
-                text, segments_list, lang = self.transcribe_segment(segment_path, use_vad, initial_prompt=initial_prompt)
+                # ⚠️ IMPORTANT : Appliquer initial_prompt uniquement au premier segment (index 0)
+                # Le prompt initial doit guider le contexte du début, pas de chaque segment
+                use_prompt_for_this_segment = initial_prompt if (i == 0 and initial_prompt) else None
+                text, segments_list, lang = self.transcribe_segment(segment_path, use_vad, initial_prompt=use_prompt_for_this_segment)
                 
                 # Ajuster les timestamps avec l'offset
                 for seg in segments_list:
@@ -365,11 +368,17 @@ class TranscriptionService:
                 logger.info(f"{log_prefix}✨ Audio preprocessed: MONO (stereo not detected or diarization disabled)")
             
             # 3. Découpe intelligente (si nécessaire) - utilise la version mono pour Whisper avec taille adaptative
-            segment_paths = split_audio_intelligent(
-                processed_path_mono,
-                use_vad=use_vad,
-                segment_length_ms=self.config.segment_length_ms  # Taille adaptative selon CPU
-            )
+            # ⚠️ IMPORTANT : Si un initial_prompt est fourni, NE PAS segmenter l'audio
+            # Le prompt initial doit être appliqué à l'audio complet, pas à des segments individuels
+            if initial_prompt:
+                logger.info(f"{log_prefix}🔍 Initial prompt provided → Skipping segmentation (will transcribe full audio as single segment)")
+                segment_paths = [processed_path_mono]  # Traiter l'audio complet comme un seul segment
+            else:
+                segment_paths = split_audio_intelligent(
+                    processed_path_mono,
+                    use_vad=use_vad,
+                    segment_length_ms=self.config.segment_length_ms  # Taille adaptative selon CPU
+                )
             logger.info(f"{log_prefix}🔪 Created {len(segment_paths)} segment(s) (adaptive size: {self.config.segment_length_ms}ms)")
             
             # 4. Transcription (séquentielle dans le processus Celery)
@@ -380,8 +389,10 @@ class TranscriptionService:
             # Transcription séquentielle pour plusieurs segments
             if len(segment_paths) > 1:
                 logger.info(f"{log_prefix}⚡ Sequential transcription: {len(segment_paths)} segments")
+                # Si initial_prompt est fourni, il ne devrait pas y avoir plusieurs segments (segmentation désactivée)
+                # Mais par sécurité, on ne passe le prompt qu'au premier segment si on a plusieurs segments
                 full_segments, full_text, language_detected = self._transcribe_sequential(
-                    segment_paths, use_vad, log_prefix, initial_prompt=initial_prompt
+                    segment_paths, use_vad, log_prefix, initial_prompt=None  # Pas de prompt pour segments multiples
                 )
             else:
                 # Transcription séquentielle pour un seul segment (plus simple)
