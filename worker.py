@@ -255,16 +255,10 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
     # Vérifier si on doit utiliser le mode distribué
     if use_distributed is None:
         try:
-            # ⚠️ IMPORTANT : Si un initial_prompt est fourni, forcer le mode classique (non distribué)
-            # Le prompt initial doit être appliqué à l'audio complet, pas à un segment
-            if has_initial_prompt:
-                logger.info(
-                    f"[{transcription_id}] 📊 DISTRIBUTION DECISION (worker) | "
-                    f"Initial prompt provided → Forcing CLASSIC mode (non-distributed) | "
-                    f"Reason: initial_prompt must be applied to full audio, not segments"
-                )
-                use_distributed = False
-            elif file_path:
+            # ⚠️ MODIFICATION : Permettre le mode distribué même avec initial_prompt
+            # En mode distribué, l'initial_prompt est utilisé uniquement pour le premier segment (segment_index == 0)
+            # Cela fonctionne mieux que le mode non-distribué qui ignore souvent le début de l'audio
+            if file_path:
                 file_path_obj = Path(file_path)
                 if file_path_obj.exists():
                     import soundfile as sf

@@ -92,7 +92,7 @@ class TranscriptionService:
             logger.warning(f"⚠️ Failed to initialize diarization service: {e} (will be skipped if requested)")
             self.diarization_service = None
         
-    def transcribe_segment(self, file_path: Path, use_vad: bool = True, retry_without_vad: bool = True, initial_prompt: Optional[str] = None) -> Tuple[str, List[Dict], str]:
+    def transcribe_segment(self, file_path: Path, use_vad: bool = True, retry_without_vad: bool = True, initial_prompt: Optional[str] = None, padding_offset: float = 0.0) -> Tuple[str, List[Dict], str]:
         """
         Transcrit un segment audio avec consommation progressive du générateur.
         
@@ -101,6 +101,7 @@ class TranscriptionService:
             use_vad: Utiliser la détection de voix
             retry_without_vad: Réessayer sans VAD en cas d'erreur
             initial_prompt: Prompt de contexte pour guider Whisper
+            padding_offset: Offset en secondes à soustraire des timestamps (pour compenser un padding de silence ajouté au début)
         """
         # Charger le modèle Whisper en lazy loading
         if self.model is None:
@@ -227,7 +228,7 @@ class TranscriptionService:
             
             if use_vad and retry_without_vad:
                 logger.warning(f"⚠️ Retrying WITHOUT VAD...")
-                return self.transcribe_segment(file_path, use_vad=False, retry_without_vad=False, initial_prompt=initial_prompt)
+                return self.transcribe_segment(file_path, use_vad=False, retry_without_vad=False, initial_prompt=initial_prompt, padding_offset=padding_offset)
             else:
                 raise Exception(f"Transcription failed: {e}")
         
@@ -241,9 +242,12 @@ class TranscriptionService:
         
         for i, seg in enumerate(segments_list_raw):
             try:
+                # Ajuster les timestamps si un padding a été ajouté au début
+                start_time = max(0.0, round(seg.start - padding_offset, 2))
+                end_time = max(0.0, round(seg.end - padding_offset, 2))
                 segments_list.append({
-                    "start": round(seg.start, 2),
-                    "end": round(seg.end, 2),
+                    "start": start_time,
+                    "end": end_time,
                     "text": seg.text.strip()
                 })
                 text_full += seg.text.strip() + " "
@@ -379,17 +383,14 @@ class TranscriptionService:
                 logger.info(f"{log_prefix}✨ Audio preprocessed: MONO (stereo not detected or diarization disabled)")
             
             # 3. Découpe intelligente (si nécessaire) - utilise la version mono pour Whisper avec taille adaptative
-            # ⚠️ IMPORTANT : Si un initial_prompt est fourni, NE PAS segmenter l'audio
-            # Le prompt initial doit être appliqué à l'audio complet, pas à des segments individuels
-            if initial_prompt:
-                logger.info(f"{log_prefix}🔍 Initial prompt provided → Skipping segmentation (will transcribe full audio as single segment)")
-                segment_paths = [processed_path_mono]  # Traiter l'audio complet comme un seul segment
-            else:
-                segment_paths = split_audio_intelligent(
-                    processed_path_mono,
-                    use_vad=use_vad,
-                    segment_length_ms=self.config.segment_length_ms  # Taille adaptative selon CPU
-                )
+            # Note: En mode distribué, la segmentation est gérée par orchestrate_distributed_transcription_task
+            # Ici, on est en mode classique (non-distribué), donc on segmente si nécessaire
+            padding_offset = 0.0  # Offset pour compenser le padding de silence (non utilisé pour l'instant)
+            segment_paths = split_audio_intelligent(
+                processed_path_mono,
+                use_vad=use_vad,
+                segment_length_ms=self.config.segment_length_ms  # Taille adaptative selon CPU
+            )
             logger.info(f"{log_prefix}🔪 Created {len(segment_paths)} segment(s) (adaptive size: {self.config.segment_length_ms}ms)")
             
             # 4. Transcription (séquentielle dans le processus Celery)
@@ -408,12 +409,9 @@ class TranscriptionService:
             else:
                 # Transcription séquentielle pour un seul segment (plus simple)
                 logger.info(f"{log_prefix}🎤 Transcribing single segment...")
-                # ⚠️ IMPORTANT : Si initial_prompt est fourni, désactiver le VAD pour garantir la transcription complète
-                # Le VAD peut être trop agressif et filtrer le début, même avec un prompt
-                use_vad_for_transcription = use_vad if not initial_prompt else False
-                if initial_prompt and not use_vad_for_transcription:
-                    logger.info(f"{log_prefix}🔍 VAD disabled for transcription with initial_prompt to ensure complete transcription from start")
-                text, segments_list, lang = self.transcribe_segment(segment_paths[0], use_vad=use_vad_for_transcription, initial_prompt=initial_prompt)
+                # Note: En mode classique avec initial_prompt, on utilise le VAD normalement
+                # Le mode distribué est préféré pour les audios longs avec initial_prompt
+                text, segments_list, lang = self.transcribe_segment(segment_paths[0], use_vad=use_vad, initial_prompt=initial_prompt, padding_offset=padding_offset)
                 
                 full_segments = segments_list
                 full_text = text
