@@ -281,11 +281,7 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
     if use_distributed and file_path:
         file_path_obj = Path(file_path)
         if file_path_obj.exists():
-            logger.info(
-                f"[{transcription_id}] 🚀 DISTRIBUTED MODE | "
-                f"Delegating to orchestrate_distributed_transcription | "
-                f"Worker: {config.instance_name}"
-            )
+            logger.info(f"[{transcription_id}] 🚀 DISTRIBUTED MODE | Delegating to orchestrate_distributed_transcription | Worker: {config.instance_name}")
             
             from celery import current_app as celery_current_app
             orchestrate_task = celery_current_app.send_task(
@@ -295,10 +291,7 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
                 countdown=1
             )
             
-            logger.info(
-                f"[{transcription_id}] ✅ DISTRIBUTED MODE | "
-                f"Orchestration task enqueued: {orchestrate_task.id}"
-            )
+            logger.info(f"[{transcription_id}] ✅ DISTRIBUTED MODE | Orchestration task enqueued: {orchestrate_task.id}")
             
             return {
                 "transcription_id": transcription_id,
@@ -878,11 +871,18 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         # mais pas pour les segments suivants pour éviter les suppressions de texte.
         use_prompt_for_segment = initial_prompt if (segment_index == 0) else None
         
+        # ⚠️ IMPORTANT : Si un initial_prompt est fourni pour le premier segment, désactiver le VAD
+        # Le VAD peut filtrer le début du premier segment même avec un initial_prompt
+        use_vad_for_segment = use_vad if not use_prompt_for_segment else False
+        
         logger.info(
             f"[{transcription_id}] ⚙️ DISTRIBUTED SEGMENT | Worker {config.instance_name} processing | "
             f"Segment: {segment_index+1}/{total_segments} | "
-            f"Model: {whisper_model} | VAD: {use_vad} | Initial prompt: {use_prompt_for_segment if use_prompt_for_segment else '(none - using only for first segment)'}"
+            f"Model: {whisper_model} | VAD: {use_vad_for_segment} | Initial prompt: {use_prompt_for_segment if use_prompt_for_segment else '(none - using only for first segment)'}"
         )
+        
+        if use_prompt_for_segment and not use_vad_for_segment:
+            logger.info(f"[{transcription_id}] 🔍 VAD disabled for first segment with initial_prompt to ensure complete transcription from start")
         
         # Transcrit le segment
         transcription_service = get_transcription_service(model_name=whisper_model)
@@ -893,7 +893,7 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
         text, segments_list, lang = transcription_service.transcribe_segment(
             segment_path_obj,
-            use_vad=use_vad,
+            use_vad=use_vad_for_segment,  # VAD désactivé pour le premier segment si initial_prompt
             initial_prompt=use_prompt_for_segment  # ✅ Utiliser le prompt uniquement pour le premier segment
         )
         
