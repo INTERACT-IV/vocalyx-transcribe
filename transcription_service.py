@@ -382,40 +382,28 @@ class TranscriptionService:
             else:
                 logger.info(f"{log_prefix}✨ Audio preprocessed: MONO (stereo not detected or diarization disabled)")
             
-            # 3. Découpe intelligente (si nécessaire) - utilise la version mono pour Whisper avec taille adaptative
-            # Note: En mode distribué, la segmentation est gérée par orchestrate_distributed_transcription_task
-            # Ici, on est en mode classique (non-distribué), donc on segmente si nécessaire
-            padding_offset = 0.0  # Offset pour compenser le padding de silence (non utilisé pour l'instant)
-            segment_paths = split_audio_intelligent(
-                processed_path_mono,
-                use_vad=use_vad,
-                segment_length_ms=self.config.segment_length_ms  # Taille adaptative selon CPU
-            )
-            logger.info(f"{log_prefix}🔪 Created {len(segment_paths)} segment(s) (adaptive size: {self.config.segment_length_ms}ms)")
+            # 3. Mode classique : traiter le fichier audio complet sans segmentation
+            # ⚠️ IMPORTANT : En mode classique (non-distribué), on traite toujours le fichier audio complet
+            # La segmentation est uniquement utilisée en mode distribué
+            logger.info(f"{log_prefix}🎤 CLASSIC MODE: Processing full audio file without segmentation")
+            padding_offset = 0.0  # Offset pour compenser le padding de silence (non utilisé en mode classique)
             
-            # 4. Transcription (séquentielle dans le processus Celery)
+            # 4. Transcription du fichier audio complet
             full_text = ""
             full_segments = []
             language_detected = None
             
-            # Transcription séquentielle pour plusieurs segments
-            if len(segment_paths) > 1:
-                logger.info(f"{log_prefix}⚡ Sequential transcription: {len(segment_paths)} segments")
-                # Si initial_prompt est fourni, il ne devrait pas y avoir plusieurs segments (segmentation désactivée)
-                # Mais par sécurité, on ne passe le prompt qu'au premier segment si on a plusieurs segments
-                full_segments, full_text, language_detected = self._transcribe_sequential(
-                    segment_paths, use_vad, log_prefix, initial_prompt=None  # Pas de prompt pour segments multiples
-                )
-            else:
-                # Transcription séquentielle pour un seul segment (plus simple)
-                logger.info(f"{log_prefix}🎤 Transcribing single segment...")
-                # Note: En mode classique avec initial_prompt, on utilise le VAD normalement
-                # Le mode distribué est préféré pour les audios longs avec initial_prompt
-                text, segments_list, lang = self.transcribe_segment(segment_paths[0], use_vad=use_vad, initial_prompt=initial_prompt, padding_offset=padding_offset)
-                
-                full_segments = segments_list
-                full_text = text
-                language_detected = lang
+            logger.info(f"{log_prefix}🎤 Transcribing full audio file...")
+            text, segments_list, lang = self.transcribe_segment(
+                processed_path_mono, 
+                use_vad=use_vad, 
+                initial_prompt=initial_prompt, 
+                padding_offset=padding_offset
+            )
+            
+            full_segments = segments_list
+            full_text = text
+            language_detected = lang
             
             # 5. Diarisation stéréo (si activée pour cette transcription)
             if use_diarization:
@@ -478,10 +466,9 @@ class TranscriptionService:
                     if processed_path_stereo.exists():
                         processed_path_stereo.unlink()
                 
-                # Nettoyer les segments
-                for seg_path in segment_paths:
-                    if seg_path.exists():
-                        seg_path.unlink()
+                # Nettoyer les segments (si segmentation avait été faite)
+                # En mode classique, pas de segments à nettoyer car on traite le fichier complet
+                # Pas de nettoyage de segments nécessaire en mode classique
                 
                 log_prefix = f"[{transcription_id}] " if transcription_id else ""
                 logger.debug(f"{log_prefix}🧹 Temporary files cleaned")
