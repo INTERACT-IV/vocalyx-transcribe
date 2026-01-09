@@ -562,14 +562,21 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
         processed_path_mono = preprocessed['mono']
         
         # 2. Découper en segments (forcer la découpe car on est en mode distribué)
+        # ⚠️ IMPORTANT : Si un initial_prompt est fourni, désactiver le VAD pour la segmentation
+        # Le VAD peut filtrer le début lors de la segmentation, même si on utilise une découpe temporelle
+        # La découpe temporelle simple préserve mieux le début de l'audio
+        use_vad_for_segmentation = use_vad if not initial_prompt else False
+        if initial_prompt and not use_vad_for_segmentation:
+            logger.info(f"[{transcription_id}] 🔍 VAD disabled for segmentation with initial_prompt to preserve audio start")
+        
         logger.info(
             f"[{transcription_id}] ✂️ DISTRIBUTED ORCHESTRATION | Step 2/6: Splitting audio into segments | "
-            f"VAD: {use_vad} | Segment length: {config.segment_length_ms}ms | "
+            f"VAD: {use_vad_for_segmentation} | Segment length: {config.segment_length_ms}ms | "
             f"Force split: True (distributed mode)"
         )
         segment_paths = split_audio_intelligent(
             processed_path_mono,
-            use_vad=use_vad,
+            use_vad=use_vad_for_segmentation,  # VAD désactivé si initial_prompt pour préserver le début
             segment_length_ms=config.segment_length_ms,
             force_split_for_distribution=True  # Forcer la découpe en mode distribué
         )
@@ -894,19 +901,22 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         
         # ⚠️ IMPORTANT : Si c'est le premier segment avec initial_prompt, ajouter un padding de silence
         # pour forcer Whisper à traiter le début même s'il est silencieux
+        # Le padding doit être suffisant (10 secondes) car Whisper peut ignorer jusqu'à 30 secondes de début silencieux
         padding_offset = 0.0
         final_segment_path = segment_path_obj
         if use_prompt_for_segment and segment_index == 0:
             try:
                 audio = AudioSegment.from_file(str(segment_path_obj))
-                # Ajouter 1 seconde de silence au début (16kHz mono)
-                silence = AudioSegment.silent(duration=1000, frame_rate=16000)
+                # Ajouter 10 secondes de silence au début (16kHz mono) - padding très généreux
+                # Whisper peut ignorer jusqu'à 30 secondes de début, donc 10 secondes de padding
+                # devrait forcer Whisper à traiter au moins le début réel de l'audio
+                silence = AudioSegment.silent(duration=10000, frame_rate=16000)
                 audio_with_padding = silence + audio
                 padded_path = segment_path_obj.parent / f"{segment_path_obj.stem}_padded.wav"
                 audio_with_padding.export(str(padded_path), format="wav")
                 final_segment_path = padded_path
-                padding_offset = 1.0  # 1 seconde de padding à compenser
-                logger.info(f"[{transcription_id}] 🔍 Added 1s silence padding at start of first segment to force Whisper to process beginning (will adjust timestamps by -1s)")
+                padding_offset = 10.0  # 10 secondes de padding à compenser
+                logger.info(f"[{transcription_id}] 🔍 Added 10s silence padding at start of first segment to force Whisper to process beginning (will adjust timestamps by -10s)")
             except Exception as e:
                 logger.warning(f"[{transcription_id}] ⚠️ Could not add silence padding to first segment: {e}, using original segment")
         
