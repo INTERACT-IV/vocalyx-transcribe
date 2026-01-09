@@ -21,6 +21,7 @@ from infrastructure.redis.redis_manager import RedisCompressionManager, RedisTra
 from infrastructure.models.model_cache import ModelCache
 from application.services.diarization_merger import DiarizationMerger
 from audio_utils import split_audio_intelligent, preprocess_audio, get_audio_duration
+from pydub import AudioSegment
 
 config = Config()
 
@@ -891,10 +892,29 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         if not segment_path_obj.exists():
             raise FileNotFoundError(f"Segment not found: {segment_path}")
         
+        # ⚠️ IMPORTANT : Si c'est le premier segment avec initial_prompt, ajouter un padding de silence
+        # pour forcer Whisper à traiter le début même s'il est silencieux
+        padding_offset = 0.0
+        final_segment_path = segment_path_obj
+        if use_prompt_for_segment and segment_index == 0:
+            try:
+                audio = AudioSegment.from_file(str(segment_path_obj))
+                # Ajouter 1 seconde de silence au début (16kHz mono)
+                silence = AudioSegment.silent(duration=1000, frame_rate=16000)
+                audio_with_padding = silence + audio
+                padded_path = segment_path_obj.parent / f"{segment_path_obj.stem}_padded.wav"
+                audio_with_padding.export(str(padded_path), format="wav")
+                final_segment_path = padded_path
+                padding_offset = 1.0  # 1 seconde de padding à compenser
+                logger.info(f"[{transcription_id}] 🔍 Added 1s silence padding at start of first segment to force Whisper to process beginning (will adjust timestamps by -1s)")
+            except Exception as e:
+                logger.warning(f"[{transcription_id}] ⚠️ Could not add silence padding to first segment: {e}, using original segment")
+        
         text, segments_list, lang = transcription_service.transcribe_segment(
-            segment_path_obj,
+            final_segment_path,
             use_vad=use_vad_for_segment,  # VAD désactivé pour le premier segment si initial_prompt
-            initial_prompt=use_prompt_for_segment  # ✅ Utiliser le prompt uniquement pour le premier segment
+            initial_prompt=use_prompt_for_segment,  # ✅ Utiliser le prompt uniquement pour le premier segment
+            padding_offset=padding_offset  # Compenser le padding de silence
         )
         
         processing_time = round(time.time() - start_time, 2)
