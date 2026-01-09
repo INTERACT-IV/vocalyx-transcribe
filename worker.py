@@ -308,14 +308,158 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
                 "mode": "distributed"
             }
     
-    # MODE CLASSIQUE : Déléguer à la fonction dédiée
+    # MODE CLASSIQUE : Traiter directement
+    def _transcribe_classic_mode(transcription_id: str, transcription: dict, file_path: str, initial_prompt, api_client, task_id: str):
+        """
+        Traite la transcription en mode classique (non-distribué).
+        Un seul worker traite l'audio complet de manière séquentielle.
+        
+        Args:
+            transcription_id: ID de la transcription
+            transcription: Données de la transcription depuis l'API
+            file_path: Chemin vers le fichier audio
+            initial_prompt: Prompt initial pour guider Whisper (optionnel)
+            api_client: Client API pour mettre à jour la transcription
+            task_id: ID de la tâche Celery
+        """
+        logger.info(
+            f"[{transcription_id}] 🎯 CLASSIC MODE STARTED | "
+            f"Worker: {config.instance_name} | "
+            f"Task ID: {task_id} | "
+            f"Mode: Single worker processing entire audio (non-distributed)"
+        )
+        
+        # ⚠️ IMPORTANT : Enregistrer le temps de début RÉEL du traitement (pas de la création de la tâche)
+        # Ce temps exclut le temps d'attente dans la file Celery
+        processing_start_time = time.time()
+        
+        try:
+            use_vad = transcription.get('vad_enabled', True)
+            use_diarization = transcription.get('diarization_enabled', False)
+            whisper_model = transcription.get('whisper_model', 'small')  # Récupérer le modèle choisi
+            
+            logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad} | Diarization: {use_diarization} | Model: {whisper_model}")
+            
+            # 2. Mettre à jour le statut à "processing" (début réel du traitement)
+            # ⚠️ IMPORTANT : Le statut "processing" indique que le worker a commencé le traitement réel
+            # Le temps de traitement sera calculé à partir de maintenant
+            # ✅ NOUVEAU : Enregistrer le temps de début réel du traitement
+            # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
+            processing_start_datetime = datetime.utcnow()
+            
+            api_client.update_transcription(transcription_id, {
+                "status": "processing",
+                "worker_id": config.instance_name,
+                "processing_start_time": processing_start_datetime.isoformat()  # ✅ NOUVEAU
+            })
+            logger.info(f"[{transcription_id}] ⚙️ Status updated to 'processing' (real processing started)")
+            
+            # 3. Obtenir le service de transcription avec cache de modèles (Phase 3 - Optimisation)
+            # Le cache réutilise les modèles déjà chargés, évitant 5-15s de chargement
+            logger.info(f"[{transcription_id}] 🎤 Getting transcription service with model: {whisper_model} (cached)")
+            transcription_service = get_transcription_service(model_name=whisper_model)
+            
+            # 4. Exécuter la transcription
+            logger.info(f"[{transcription_id}] 🎤 Starting transcription with Whisper...")
+            
+            # initial_prompt a déjà été récupéré et normalisé plus tôt
+            logger.info(f"[{transcription_id}] 🔍 Initial prompt: {initial_prompt if initial_prompt else '(none)'}")
+            
+            result = transcription_service.transcribe(
+                file_path=file_path,
+                use_vad=use_vad,
+                use_diarization=use_diarization,
+                transcription_id=transcription_id,
+                initial_prompt=initial_prompt
+            )
+            
+            logger.info(f"[{transcription_id}] ✅ Transcription service completed")
+            
+            # ⚠️ IMPORTANT : Calculer uniquement le temps de traitement RÉEL (sans temps d'attente)
+            processing_end_time = time.time()
+            processing_time = round(processing_end_time - processing_start_time, 2)
+            
+            logger.info(
+                f"[{transcription_id}] ✅ Transcription completed | "
+                f"Duration: {result['duration']}s | "
+                f"Processing: {processing_time}s | "
+                f"Segments: {len(result['segments'])}"
+            )
+            
+            # 4. Mettre à jour avec les résultats
+            logger.info(f"[{transcription_id}] 💾 Saving results to API...")
+            enrichment_requested = transcription.get('enrichment_requested', False)
+            status = "transcribed" if enrichment_requested else "done"
+            
+            # ✅ NOUVEAU : Calculer les métriques de performance
+            queued_at = transcription.get('queued_at')
+            processing_start_time_str = transcription.get('processing_start_time')
+            
+            # Calculer le temps d'attente dans la file
+            queue_wait_time = None
+            if queued_at and processing_start_time_str:
+                try:
+                    # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
+                    queued_dt = datetime.fromisoformat(queued_at.replace('Z', '+00:00'))
+                    start_dt = datetime.fromisoformat(processing_start_time_str.replace('Z', '+00:00'))
+                    queue_wait_time = round((start_dt - queued_dt).total_seconds(), 2)
+                except Exception as e:
+                    logger.warning(f"[{transcription_id}] ⚠️ Failed to calculate queue_wait_time: {e}")
+            
+            # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
+            processing_end_datetime = datetime.utcnow()
+            
+            api_client.update_transcription(transcription_id, {
+                "status": status,
+                "text": result["text"],
+                "segments": json.dumps(result["segments"]),
+                "language": result["language"],
+                "duration": result["duration"],
+                "processing_time": processing_time,
+                "segments_count": len(result["segments"]),
+                "queue_wait_time": queue_wait_time,  # ✅ NOUVEAU
+                "processing_end_time": processing_end_datetime.isoformat()  # ✅ NOUVEAU
+            })
+            
+            logger.info(f"[{transcription_id}] 💾 Results saved to API (status: {status})")
+            
+            # 5. Supprimer le fichier .wav original après transcription réussie
+            if file_path:
+                try:
+                    file_path_obj = Path(file_path)
+                    if file_path_obj.exists() and file_path_obj.suffix.lower() == '.wav':
+                        file_path_obj.unlink()
+                        logger.info(f"[{transcription_id}] 🗑️ Original audio file deleted: {file_path}")
+                    elif file_path_obj.exists():
+                        logger.debug(f"[{transcription_id}] ℹ️ File not deleted (not .wav): {file_path}")
+                except Exception as delete_error:
+                    logger.warning(f"[{transcription_id}] ⚠️ Failed to delete original audio file: {delete_error}")
+            
+            # 6. Si l'enrichissement est demandé, déclencher la tâche d'enrichissement
+            if enrichment_requested:
+                trigger_enrichment_task(transcription_id, api_client)
+            
+            return {
+                "status": "success",
+                "transcription_id": transcription_id,
+                "duration": result["duration"],
+                "processing_time": processing_time,
+                "segments_count": len(result["segments"]),
+                "enrichment_triggered": enrichment_requested
+            }
+            
+        except Exception as e:
+            logger.error(f"[{transcription_id}] ❌ Error in classic mode: {e}", exc_info=True)
+            raise
+    
     try:
-        return self._transcribe_classic_mode(
+        return _transcribe_classic_mode(
             transcription_id=transcription_id,
             transcription=transcription,
             file_path=file_path,
             initial_prompt=initial_prompt,
-            api_client=api_client
+            api_client=api_client,
+            task_id=self.request.id
         )
     except Exception as e:
         logger.error(f"[{transcription_id}] ❌ Error in transcribe_audio_task: {e}", exc_info=True)
@@ -354,148 +498,6 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
             "transcription_id": transcription_id,
             "error": str(e)
         }
-
-def _transcribe_classic_mode(self, transcription_id: str, transcription: dict, file_path: str, initial_prompt, api_client):
-    """
-    Traite la transcription en mode classique (non-distribué).
-    Un seul worker traite l'audio complet de manière séquentielle.
-    
-    Args:
-        transcription_id: ID de la transcription
-        transcription: Données de la transcription depuis l'API
-        file_path: Chemin vers le fichier audio
-        initial_prompt: Prompt initial pour guider Whisper (optionnel)
-        api_client: Client API pour mettre à jour la transcription
-    """
-    logger.info(
-        f"[{transcription_id}] 🎯 CLASSIC MODE STARTED | "
-        f"Worker: {config.instance_name} | "
-        f"Task ID: {self.request.id} | "
-        f"Mode: Single worker processing entire audio (non-distributed)"
-    )
-    
-    # ⚠️ IMPORTANT : Enregistrer le temps de début RÉEL du traitement (pas de la création de la tâche)
-    # Ce temps exclut le temps d'attente dans la file Celery
-    processing_start_time = time.time()
-    
-    try:
-        use_vad = transcription.get('vad_enabled', True)
-        use_diarization = transcription.get('diarization_enabled', False)
-        whisper_model = transcription.get('whisper_model', 'small')  # Récupérer le modèle choisi
-        
-        logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad} | Diarization: {use_diarization} | Model: {whisper_model}")
-        
-        # 2. Mettre à jour le statut à "processing" (début réel du traitement)
-        # ⚠️ IMPORTANT : Le statut "processing" indique que le worker a commencé le traitement réel
-        # Le temps de traitement sera calculé à partir de maintenant
-        # ✅ NOUVEAU : Enregistrer le temps de début réel du traitement
-        # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
-        processing_start_datetime = datetime.utcnow()
-        
-        api_client.update_transcription(transcription_id, {
-            "status": "processing",
-            "worker_id": config.instance_name,
-            "processing_start_time": processing_start_datetime.isoformat()  # ✅ NOUVEAU
-        })
-        logger.info(f"[{transcription_id}] ⚙️ Status updated to 'processing' (real processing started)")
-        
-        # 3. Obtenir le service de transcription avec cache de modèles (Phase 3 - Optimisation)
-        # Le cache réutilise les modèles déjà chargés, évitant 5-15s de chargement
-        logger.info(f"[{transcription_id}] 🎤 Getting transcription service with model: {whisper_model} (cached)")
-        transcription_service = get_transcription_service(model_name=whisper_model)
-        
-        # 4. Exécuter la transcription
-        logger.info(f"[{transcription_id}] 🎤 Starting transcription with Whisper...")
-        
-        # initial_prompt a déjà été récupéré et normalisé plus tôt
-        logger.info(f"[{transcription_id}] 🔍 Initial prompt: {initial_prompt if initial_prompt else '(none)'}")
-        
-        result = transcription_service.transcribe(
-            file_path=file_path,
-            use_vad=use_vad,
-            use_diarization=use_diarization,
-            transcription_id=transcription_id,
-            initial_prompt=initial_prompt
-        )
-        
-        logger.info(f"[{transcription_id}] ✅ Transcription service completed")
-        
-        # ⚠️ IMPORTANT : Calculer uniquement le temps de traitement RÉEL (sans temps d'attente)
-        processing_end_time = time.time()
-        processing_time = round(processing_end_time - processing_start_time, 2)
-        
-        logger.info(
-            f"[{transcription_id}] ✅ Transcription completed | "
-            f"Duration: {result['duration']}s | "
-            f"Processing: {processing_time}s | "
-            f"Segments: {len(result['segments'])}"
-        )
-        
-        # 4. Mettre à jour avec les résultats
-        logger.info(f"[{transcription_id}] 💾 Saving results to API...")
-        enrichment_requested = transcription.get('enrichment_requested', False)
-        status = "transcribed" if enrichment_requested else "done"
-        
-        # ✅ NOUVEAU : Calculer les métriques de performance
-        queued_at = transcription.get('queued_at')
-        processing_start_time_str = transcription.get('processing_start_time')
-        
-        # Calculer le temps d'attente dans la file
-        queue_wait_time = None
-        if queued_at and processing_start_time_str:
-            try:
-                # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
-                queued_dt = datetime.fromisoformat(queued_at.replace('Z', '+00:00'))
-                start_dt = datetime.fromisoformat(processing_start_time_str.replace('Z', '+00:00'))
-                queue_wait_time = round((start_dt - queued_dt).total_seconds(), 2)
-            except Exception as e:
-                logger.warning(f"[{transcription_id}] ⚠️ Failed to calculate queue_wait_time: {e}")
-        
-        # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
-        processing_end_datetime = datetime.utcnow()
-        
-        api_client.update_transcription(transcription_id, {
-            "status": status,
-            "text": result["text"],
-            "segments": json.dumps(result["segments"]),
-            "language": result["language"],
-            "duration": result["duration"],
-            "processing_time": processing_time,
-            "segments_count": len(result["segments"]),
-            "queue_wait_time": queue_wait_time,  # ✅ NOUVEAU
-            "processing_end_time": processing_end_datetime.isoformat()  # ✅ NOUVEAU
-        })
-        
-        logger.info(f"[{transcription_id}] 💾 Results saved to API (status: {status})")
-        
-        # 5. Supprimer le fichier .wav original après transcription réussie
-        if file_path:
-            try:
-                file_path_obj = Path(file_path)
-                if file_path_obj.exists() and file_path_obj.suffix.lower() == '.wav':
-                    file_path_obj.unlink()
-                    logger.info(f"[{transcription_id}] 🗑️ Original audio file deleted: {file_path}")
-                elif file_path_obj.exists():
-                    logger.debug(f"[{transcription_id}] ℹ️ File not deleted (not .wav): {file_path}")
-            except Exception as delete_error:
-                logger.warning(f"[{transcription_id}] ⚠️ Failed to delete original audio file: {delete_error}")
-        
-        # 6. Si l'enrichissement est demandé, déclencher la tâche d'enrichissement
-        if enrichment_requested:
-            trigger_enrichment_task(transcription_id, api_client)
-        
-        return {
-            "status": "success",
-            "transcription_id": transcription_id,
-            "duration": result["duration"],
-            "processing_time": processing_time,
-            "segments_count": len(result["segments"]),
-            "enrichment_triggered": enrichment_requested
-        }
-        
-    except Exception as e:
-        logger.error(f"[{transcription_id}] ❌ Error in classic mode: {e}", exc_info=True)
-        raise
 
 
 @celery_app.task(
