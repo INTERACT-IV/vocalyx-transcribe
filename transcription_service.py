@@ -111,18 +111,34 @@ class TranscriptionService:
         text_full = ""
         info = None # Initialiser info
         
-        logger.info(f"🎯 Starting Whisper transcription (VAD: {use_vad}, initial_prompt: {initial_prompt if initial_prompt else '(none)'})...")
+        # ⚠️ IMPORTANT : Si un initial_prompt est fourni, utiliser des paramètres VAD très permissifs
+        # pour garantir que Whisper traite tout l'audio, y compris le début
+        vad_params = None
+        use_vad_effective = use_vad
+        
+        if initial_prompt:
+            # Paramètres VAD très permissifs pour préserver le début de l'audio
+            vad_params = dict(
+                threshold=0.1,  # Très permissif (défaut: 0.5) - détecte même les faibles signaux
+                min_speech_duration_ms=50,  # Très court (défaut: 250) - préserve même les courts segments
+                min_silence_duration_ms=1000,  # Plus long (défaut: 2000) - évite de couper trop tôt
+                speech_pad_ms=500  # Padding généreux (défaut: 400) - préserve le contexte autour de la parole
+            )
+            # Forcer l'activation du VAD avec ces paramètres permissifs
+            use_vad_effective = True
+            logger.info(f"🔍 Using permissive VAD parameters with initial_prompt to preserve audio start (threshold=0.1, min_speech=50ms)")
+        elif use_vad:
+            # Utiliser les paramètres VAD de la config (plus cohérent)
+            vad_params = dict(
+                threshold=self.config.vad_threshold,
+                min_speech_duration_ms=self.config.vad_min_speech_duration_ms,
+                min_silence_duration_ms=self.config.vad_min_silence_duration_ms,
+                speech_pad_ms=self.config.vad_speech_pad_ms
+            )
+        
+        logger.info(f"🎯 Starting Whisper transcription (VAD: {use_vad_effective}, initial_prompt: {initial_prompt if initial_prompt else '(none)'})...")
         
         try:
-            vad_params = None
-            if use_vad:
-                # Utiliser les paramètres VAD de la config (plus cohérent)
-                vad_params = dict(
-                    threshold=self.config.vad_threshold,
-                    min_speech_duration_ms=self.config.vad_min_speech_duration_ms,
-                    min_silence_duration_ms=self.config.vad_min_silence_duration_ms,
-                    speech_pad_ms=self.config.vad_speech_pad_ms
-                )
             
             # --- MODIFICATION ---
             # Utiliser le verrou pour garantir l'usage exclusif du modèle (transcribe + consommation)
@@ -145,7 +161,7 @@ class TranscriptionService:
                             beam_size=self.config.beam_size,  # 1 pour CPU (greedy search)
                             best_of=getattr(self.config, 'best_of', self.config.beam_size),  # 1 pour CPU
                             temperature=self.config.temperature,
-                            vad_filter=use_vad,  # VAD intégré de faster-whisper (optimisé)
+                            vad_filter=use_vad_effective,  # VAD avec paramètres permissifs si initial_prompt
                             vad_parameters=vad_params,
                             word_timestamps=False,  # Désactivé pour CPU (plus rapide)
                             condition_on_previous_text=False,  # Désactivé pour CPU (plus rapide)
