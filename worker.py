@@ -233,6 +233,13 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
     déléguer à orchestrate_distributed_transcription au lieu de traiter directement.
     """
     
+    # Log pour vérifier la valeur reçue depuis Celery
+    logger.info(
+        f"[{transcription_id}] 🔧 worker.py: transcribe_audio_task called | "
+        f"use_distributed={use_distributed} (type: {type(use_distributed).__name__}) | "
+        f"args received: transcription_id={transcription_id}, use_distributed={use_distributed}"
+    )
+    
     # Assure que le client API est initialisé
     api_client = get_api_client()
     
