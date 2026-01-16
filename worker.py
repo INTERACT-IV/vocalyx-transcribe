@@ -234,11 +234,34 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
     """
     
     # Log pour vérifier la valeur reçue depuis Celery
+    # IMPORTANT: Vérifier aussi self.request pour voir ce que Celery a vraiment reçu
+    request_args = getattr(self.request, 'args', None)
+    request_kwargs = getattr(self.request, 'kwargs', None)
+    
     logger.info(
         f"[{transcription_id}] 🔧 worker.py: transcribe_audio_task called | "
         f"use_distributed={use_distributed} (type: {type(use_distributed).__name__}) | "
-        f"args received: transcription_id={transcription_id}, use_distributed={use_distributed}"
+        f"args received: transcription_id={transcription_id}, use_distributed={use_distributed} | "
+        f"self.request.args={request_args} | "
+        f"self.request.kwargs={request_kwargs} | "
+        f"len(request_args)={len(request_args) if request_args else 0}"
     )
+    
+    # DIAGNOSTIC: Si use_distributed est None mais que request.args contient le paramètre,
+    # c'est un problème de signature de fonction
+    if use_distributed is None and request_args and len(request_args) > 1:
+        logger.warning(
+            f"[{transcription_id}] ⚠️ DIAGNOSTIC: use_distributed=None but request.args has {len(request_args)} elements! "
+            f"args={request_args}. This suggests a parameter mismatch."
+        )
+        # Essayer de récupérer la valeur depuis request.args
+        if len(request_args) >= 2:
+            use_distributed_from_args = request_args[1]
+            logger.warning(
+                f"[{transcription_id}] 🔧 DIAGNOSTIC: Extracting use_distributed from request.args[1]={use_distributed_from_args} "
+                f"(type: {type(use_distributed_from_args).__name__})"
+            )
+            use_distributed = use_distributed_from_args
     
     # Assure que le client API est initialisé
     api_client = get_api_client()
