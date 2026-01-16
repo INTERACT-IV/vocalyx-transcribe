@@ -246,7 +246,16 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
     file_path = transcription.get('file_path')
     
     # Vérifier si on doit utiliser le mode distribué
+    # Si use_distributed est explicitement False, on force le mode classique
+    # Si use_distributed est explicitement True, on force le mode distribué
+    # Si use_distributed est None, on décide automatiquement selon la durée
+    logger.info(
+        f"[{transcription_id}] 🔧 DISTRIBUTION MODE PARAMETER | "
+        f"use_distributed={use_distributed} (type: {type(use_distributed).__name__})"
+    )
+    
     if use_distributed is None:
+        # Décision automatique selon la durée (seulement si non spécifié)
         try:
             if file_path:
                 file_path_obj = Path(file_path)
@@ -261,11 +270,26 @@ def transcribe_audio_task(self, transcription_id: str, use_distributed: bool = N
                         f"[{transcription_id}] 📊 DISTRIBUTION DECISION (worker) | "
                         f"Duration: {duration:.1f}s | "
                         f"Threshold: {min_duration}s {'(distribué désactivé)' if min_duration == 0 else ''} | "
-                        f"Mode: {'DISTRIBUTED' if use_distributed else 'CLASSIC'}"
+                        f"Mode: {'DISTRIBUTED' if use_distributed else 'CLASSIC'} | "
+                        f"Reason: Automatic decision (use_distributed was None)"
                     )
         except Exception as e:
             logger.warning(f"[{transcription_id}] ⚠️ Could not determine distribution mode: {e}")
             use_distributed = False
+    elif use_distributed is False:
+        # Mode classique forcé depuis la configuration
+        logger.info(
+            f"[{transcription_id}] 🔒 DISTRIBUTION MODE FORCED | "
+            f"Mode: CLASSIC (single worker) | "
+            f"Reason: force_distributed_mode=false in configuration"
+        )
+    elif use_distributed is True:
+        # Mode distribué forcé depuis la configuration
+        logger.info(
+            f"[{transcription_id}] 🔒 DISTRIBUTION MODE FORCED | "
+            f"Mode: DISTRIBUTED | "
+            f"Reason: force_distributed_mode=true in configuration"
+        )
     
     # Si mode distribué, déléguer à orchestrate_distributed_transcription
     if use_distributed and file_path:
