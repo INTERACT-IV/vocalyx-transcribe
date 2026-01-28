@@ -46,24 +46,52 @@ class TranscriptionService:
         
         # Si c'est un nom simple (tiny, base, small, medium, large, large-v3, large-v3-turbo), construire le chemin
         if model_path in ["tiny", "base", "small", "medium", "large", "large-v3", "large-v3-turbo"]:
-            # Modèles large-v3* stockés dans le dossier partagé
+            # Modèles large-v3* : essayer d'abord le dossier partagé monté (/opt/vocalyx/shared/...),
+            # puis retomber sur les chemins locaux classiques.
             if model_path == "large-v3":
-                # Nouveau modèle par défaut: OpenAI Whisper Large v3
-                model_path = "./shared/models/transcribe/openai-whisper-large-v3"
+                # Nouveau modèle principal: OpenAI Whisper Large v3
+                candidates = [
+                    "/opt/vocalyx/shared/models/transcribe/openai-whisper-large-v3",
+                    "/app/shared/models/transcribe/openai-whisper-large-v3",
+                    "./shared/models/transcribe/openai-whisper-large-v3",
+                ]
+                for candidate in candidates:
+                    if Path(candidate).exists():
+                        model_path = candidate
+                        break
+                else:
+                    # Fallback: laisser faster-whisper télécharger depuis HuggingFace
+                    model_path = "openai/whisper-large-v3"
             elif model_path == "large-v3-turbo":
-                # Variante turbo si disponible localement
-                model_path = "./models/transcribe/openai-whisper-large-v3-turbo"
+                # Variante turbo (si présente en local, sinon HuggingFace)
+                candidates = [
+                    "/opt/vocalyx/shared/models/transcribe/openai-whisper-large-v3-turbo",
+                    "/app/shared/models/transcribe/openai-whisper-large-v3-turbo",
+                    "./shared/models/transcribe/openai-whisper-large-v3-turbo",
+                    "./models/transcribe/openai-whisper-large-v3-turbo",
+                ]
+                for candidate in candidates:
+                    if Path(candidate).exists():
+                        model_path = candidate
+                        break
+                else:
+                    model_path = "openai/whisper-large-v3-turbo"
             else:
+                # Autres modèles locaux (tiny/base/small/medium/large) depuis ./models
                 model_path = f"./models/transcribe/openai-whisper-{self.model_name}"
         
         # Convertir les chemins relatifs en chemins absolus
-        # faster-whisper interprète les chemins relatifs comme des repo_id HuggingFace
+        # faster-whisper interprète les chemins relatifs comme des repo_id HuggingFace, donc
+        # on ne touche qu'aux chemins relatifs qui ne sont PAS déjà des repo_id HuggingFace.
         if model_path.startswith("./"):
             # Enlever le préfixe ./ et construire le chemin absolu
             relative_path = model_path[2:]  # Enlever "./"
             # Utiliser /app comme base (WORKDIR du conteneur Docker)
             model_path = f"/app/{relative_path}"
-        elif not model_path.startswith("/") and not model_path.startswith("openai/"):
+        elif (
+            not model_path.startswith("/")
+            and not model_path.startswith("openai/")
+        ):
             # Si c'est un chemin relatif sans ./ (ex: "models/...")
             # et que ce n'est pas un repo HuggingFace, le convertir en absolu
             model_path = f"/app/{model_path}"
