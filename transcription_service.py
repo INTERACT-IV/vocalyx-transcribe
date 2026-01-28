@@ -46,39 +46,10 @@ class TranscriptionService:
         
         # Si c'est un nom simple (tiny, base, small, medium, large, large-v3, large-v3-turbo), construire le chemin
         if model_path in ["tiny", "base", "small", "medium", "large", "large-v3", "large-v3-turbo"]:
-            # Modèles large-v3* : essayer d'abord le dossier partagé monté (/opt/vocalyx/shared/...),
-            # puis retomber sur les chemins locaux classiques.
-            if model_path == "large-v3":
-                # Nouveau modèle principal: OpenAI Whisper Large v3
-                candidates = [
-                    "/opt/vocalyx/shared/models/transcribe/openai-whisper-large-v3",
-                    "/app/shared/models/transcribe/openai-whisper-large-v3",
-                    "./shared/models/transcribe/openai-whisper-large-v3",
-                ]
-                for candidate in candidates:
-                    if Path(candidate).exists():
-                        model_path = candidate
-                        break
-                else:
-                    # Fallback: laisser faster-whisper télécharger depuis HuggingFace
-                    model_path = "openai/whisper-large-v3"
-            elif model_path == "large-v3-turbo":
-                # Variante turbo (si présente en local, sinon HuggingFace)
-                candidates = [
-                    "/opt/vocalyx/shared/models/transcribe/openai-whisper-large-v3-turbo",
-                    "/app/shared/models/transcribe/openai-whisper-large-v3-turbo",
-                    "./shared/models/transcribe/openai-whisper-large-v3-turbo",
-                    "./models/transcribe/openai-whisper-large-v3-turbo",
-                ]
-                for candidate in candidates:
-                    if Path(candidate).exists():
-                        model_path = candidate
-                        break
-                else:
-                    model_path = "openai/whisper-large-v3-turbo"
-            else:
-                # Autres modèles locaux (tiny/base/small/medium/large) depuis ./models
-                model_path = f"./models/transcribe/openai-whisper-{self.model_name}"
+            # Tous les modèles sont montés dans /app/models via le volume podman:
+            # /opt/vocalyx/shared/models -> /app/models
+            # Donc large-v3 et large-v3-turbo utilisent le même chemin que les autres modèles
+            model_path = f"./models/transcribe/openai-whisper-{self.model_name}"
         
         # Convertir les chemins relatifs en chemins absolus
         # faster-whisper interprète les chemins relatifs comme des repo_id HuggingFace, donc
