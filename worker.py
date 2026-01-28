@@ -110,12 +110,12 @@ def get_api_client():
     return _api_client
 
 
-def get_transcription_service(model_name: str = 'small'):
+def get_transcription_service(model_name: str = 'large-v3'):
     """
     Charge le service de transcription avec cache par modèle.
     
     Args:
-        model_name: Nom du modèle Whisper (tiny, base, small, medium, large-v3-turbo) ou chemin
+        model_name: Nom du modèle Whisper (tiny, base, small, medium, large-v3, large-v3-turbo) ou chemin
         
     Returns:
         TranscriptionService: Service de transcription avec le modèle demandé
@@ -413,7 +413,8 @@ def _transcribe_classic_mode(self, transcription_id: str, file_path: str, transc
     try:
         use_vad = transcription.get('vad_enabled', True)
         use_diarization = transcription.get('diarization_enabled', False)
-        whisper_model = transcription.get('whisper_model', 'small')  # Récupérer le modèle choisi
+        # Nouveau modèle par défaut : openai-whisper-large-v3
+        whisper_model = transcription.get('whisper_model', 'large-v3')  # Récupérer le modèle choisi
         
         logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad} | Diarization: {use_diarization} | Model: {whisper_model}")
         
@@ -594,7 +595,7 @@ def orchestrate_distributed_transcription_task(self, transcription_id: str, file
             raise FileNotFoundError(f"Audio file not found: {file_path}")
         
         use_vad = transcription.get('vad_enabled', True)
-        whisper_model = transcription.get('whisper_model', 'small')
+        whisper_model = transcription.get('whisper_model', 'large-v3')
         
         # ✅ NOUVEAU : Enregistrer le temps de début réel de l'orchestration
         # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement

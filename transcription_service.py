@@ -44,11 +44,15 @@ class TranscriptionService:
         # Construire le chemin du modèle si c'est un nom simple (tiny, base, etc.)
         model_path = self.model_name
         
-        # Si c'est un nom simple (tiny, base, small, medium, large-v3-turbo), construire le chemin
-        if model_path in ["tiny", "base", "small", "medium", "large", "large-v3-turbo"]:
-            # Pour large-v3-turbo, utiliser le nom complet
-            if model_path == "large-v3-turbo":
-                model_path = f"./models/transcribe/openai-whisper-large-v3-turbo"
+        # Si c'est un nom simple (tiny, base, small, medium, large, large-v3, large-v3-turbo), construire le chemin
+        if model_path in ["tiny", "base", "small", "medium", "large", "large-v3", "large-v3-turbo"]:
+            # Modèles large-v3* stockés dans le dossier partagé
+            if model_path == "large-v3":
+                # Nouveau modèle par défaut: OpenAI Whisper Large v3
+                model_path = "./shared/models/transcribe/openai-whisper-large-v3"
+            elif model_path == "large-v3-turbo":
+                # Variante turbo si disponible localement
+                model_path = "./models/transcribe/openai-whisper-large-v3-turbo"
             else:
                 model_path = f"./models/transcribe/openai-whisper-{self.model_name}"
         

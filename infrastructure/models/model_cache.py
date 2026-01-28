@@ -59,7 +59,8 @@ class ModelCache:
     def _normalize_model_name(self, model_name: str) -> str:
         """Normalise le nom du modèle"""
         if not model_name:
-            return 'small'
+            # Nouveau modèle par défaut
+            return 'large-v3'
         
         model_name = model_name.lower()
         
@@ -69,12 +70,13 @@ class ModelCache:
         elif model_name.startswith('./') or model_name.startswith('/'):
             parts = model_name.replace('\\', '/').split('/')
             for part in reversed(parts):
-                if part in ['tiny', 'base', 'small', 'medium', 'large', 'large-v3-turbo']:
+                if part in ['tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo']:
                     return part
-            return 'small'
+            # Fallback sur le nouveau modèle par défaut
+            return 'large-v3'
         
-        valid_models = ['tiny', 'base', 'small', 'medium', 'large', 'large-v3-turbo']
-        return model_name if model_name in valid_models else 'small'
+        valid_models = ['tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo']
+        return model_name if model_name in valid_models else 'large-v3'
     
     def _evict_lru(self):
         """Supprime le modèle le moins récemment utilisé"""
