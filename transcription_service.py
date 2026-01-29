@@ -95,9 +95,15 @@ class TranscriptionService:
             logger.warning(f"⚠️ Failed to initialize diarization service: {e} (will be skipped if requested)")
             self.diarization_service = None
         
-    def transcribe_segment(self, file_path: Path, use_vad: bool = True, retry_without_vad: bool = True) -> Tuple[str, List[Dict], str]:
+    def transcribe_segment(self, file_path: Path, use_vad: bool = True, retry_without_vad: bool = True, initial_prompt: Optional[str] = None) -> Tuple[str, List[Dict], str]:
         """
         Transcrit un segment audio avec consommation progressive du générateur.
+        
+        Args:
+            file_path: Chemin vers le segment audio
+            use_vad: Utiliser la détection de voix
+            retry_without_vad: Réessayer sans VAD en cas d'erreur
+            initial_prompt: Prompt initial optionnel pour guider la transcription (comme WhisperX)
         """
         # Charger le modèle Whisper en lazy loading
         if self.model is None:
@@ -135,17 +141,29 @@ class TranscriptionService:
                         transcribe_start_time = time.time()
                         
                         # Paramètres optimisés pour CPU
+                        # initial_prompt: comme WhisperX, guide la première fenêtre de transcription (~30s)
+                        # Dans WhisperX, initial_prompt est encodé et ajouté aux tokens initiaux
+                        # Ici, faster-whisper gère automatiquement l'encodage
+                        transcribe_kwargs = {
+                            "language": self.config.language or None,
+                            "task": "transcribe",
+                            "beam_size": self.config.beam_size,  # 1 pour CPU (greedy search)
+                            "best_of": getattr(self.config, 'best_of', self.config.beam_size),  # 1 pour CPU
+                            "temperature": self.config.temperature,
+                            "vad_filter": use_vad,  # VAD intégré de faster-whisper (optimisé)
+                            "vad_parameters": vad_params,
+                            "word_timestamps": False,  # Désactivé pour CPU (plus rapide)
+                            "condition_on_previous_text": False,  # Désactivé pour CPU (plus rapide)
+                        }
+                        
+                        # Ajouter initial_prompt si fourni (comme WhisperX)
+                        if initial_prompt is not None:
+                            transcribe_kwargs["initial_prompt"] = initial_prompt
+                            logger.info(f"📝 Using initial_prompt: {initial_prompt[:50]}..." if len(initial_prompt) > 50 else f"📝 Using initial_prompt: {initial_prompt}")
+                        
                         segments, info = self.model.transcribe(
                             str(file_path),
-                            language=self.config.language or None,
-                            task="transcribe",
-                            beam_size=self.config.beam_size,  # 1 pour CPU (greedy search)
-                            best_of=getattr(self.config, 'best_of', self.config.beam_size),  # 1 pour CPU
-                            temperature=self.config.temperature,
-                            vad_filter=use_vad,  # VAD intégré de faster-whisper (optimisé)
-                            vad_parameters=vad_params,
-                            word_timestamps=False,  # Désactivé pour CPU (plus rapide)
-                            condition_on_previous_text=False,  # Désactivé pour CPU (plus rapide)
+                            **transcribe_kwargs
                         )
                         
                         transcribe_time = time.time() - transcribe_start_time
@@ -212,7 +230,7 @@ class TranscriptionService:
             
             if use_vad and retry_without_vad:
                 logger.warning(f"⚠️ Retrying WITHOUT VAD...")
-                return self.transcribe_segment(file_path, use_vad=False, retry_without_vad=False)
+                return self.transcribe_segment(file_path, use_vad=False, retry_without_vad=False, initial_prompt=initial_prompt)
             else:
                 raise Exception(f"Transcription failed: {e}")
         
@@ -248,7 +266,8 @@ class TranscriptionService:
         self, 
         segment_paths: List[Path], 
         use_vad: bool, 
-        log_prefix: str
+        log_prefix: str,
+        initial_prompt: Optional[str] = None
     ) -> Tuple[List[Dict], str, Optional[str]]:
         """
         Transcrit plusieurs segments de manière séquentielle dans le processus Celery.
@@ -257,6 +276,7 @@ class TranscriptionService:
             segment_paths: Liste des chemins vers les segments audio
             use_vad: Utiliser la détection de voix
             log_prefix: Préfixe pour les logs
+            initial_prompt: Prompt initial optionnel (utilisé uniquement pour le premier segment, comme WhisperX)
             
         Returns:
             Tuple contenant:
@@ -272,10 +292,14 @@ class TranscriptionService:
         logger.info(f"{log_prefix}⚡ Starting sequential transcription: {num_segments} segments")
         
         # Transcription séquentielle directement dans le processus Celery
+        # Comme WhisperX, initial_prompt n'est utilisé que pour le premier segment
+        # (il guide uniquement la première fenêtre de transcription, pas les suivantes)
         time_offset = 0.0
         for i, segment_path in enumerate(segment_paths):
             try:
-                text, segments_list, lang = self.transcribe_segment(segment_path, use_vad)
+                # Utiliser initial_prompt uniquement pour le premier segment (comme WhisperX)
+                segment_prompt = initial_prompt if i == 0 else None
+                text, segments_list, lang = self.transcribe_segment(segment_path, use_vad, initial_prompt=segment_prompt)
                 
                 # Ajuster les timestamps avec l'offset
                 for seg in segments_list:
@@ -303,7 +327,7 @@ class TranscriptionService:
         
         return full_segments, full_text.strip(), language_detected
     
-    def transcribe(self, file_path: str, use_vad: bool = True, use_diarization: bool = False, transcription_id: str = None) -> Dict:
+    def transcribe(self, file_path: str, use_vad: bool = True, use_diarization: bool = False, transcription_id: str = None, initial_prompt: Optional[str] = None) -> Dict:
         """
         Transcrit un fichier audio (point d'entrée principal).
         
@@ -312,6 +336,7 @@ class TranscriptionService:
             use_vad: Utiliser la détection de voix
             use_diarization: Activer la diarisation des locuteurs
             transcription_id: ID de la transcription (pour les logs)
+            initial_prompt: Prompt initial optionnel pour guider la transcription (comme WhisperX)
             
         Returns:
             dict: Résultats de la transcription
@@ -375,12 +400,12 @@ class TranscriptionService:
             if len(segment_paths) > 1:
                 logger.info(f"{log_prefix}⚡ Sequential transcription: {len(segment_paths)} segments")
                 full_segments, full_text, language_detected = self._transcribe_sequential(
-                    segment_paths, use_vad, log_prefix
+                    segment_paths, use_vad, log_prefix, initial_prompt
                 )
             else:
                 # Transcription séquentielle pour un seul segment (plus simple)
                 logger.info(f"{log_prefix}🎤 Transcribing single segment...")
-                text, segments_list, lang = self.transcribe_segment(segment_paths[0], use_vad=use_vad)
+                text, segments_list, lang = self.transcribe_segment(segment_paths[0], use_vad=use_vad, initial_prompt=initial_prompt)
                 
                 full_segments = segments_list
                 full_text = text

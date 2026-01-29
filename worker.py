@@ -415,6 +415,11 @@ def _transcribe_classic_mode(self, transcription_id: str, file_path: str, transc
         use_diarization = transcription.get('diarization_enabled', False)
         # Nouveau modèle par défaut : openai-whisper-large-v3
         whisper_model = transcription.get('whisper_model', 'large-v3')  # Récupérer le modèle choisi
+        # Récupérer initial_prompt depuis les métadonnées (comme WhisperX)
+        initial_prompt = transcription.get('initial_prompt', None)
+        
+        if initial_prompt:
+            logger.info(f"[{transcription_id}] 📝 Initial prompt provided: {initial_prompt[:50]}..." if len(initial_prompt) > 50 else f"[{transcription_id}] 📝 Initial prompt provided: {initial_prompt}")
         
         logger.info(f"[{transcription_id}] 📁 File: {file_path} | VAD: {use_vad} | Diarization: {use_diarization} | Model: {whisper_model}")
         
@@ -444,7 +449,8 @@ def _transcribe_classic_mode(self, transcription_id: str, file_path: str, transc
             file_path=file_path,
             use_vad=use_vad,
             use_diarization=use_diarization,
-            transcription_id=transcription_id
+            transcription_id=transcription_id,
+            initial_prompt=initial_prompt  # Passer initial_prompt au service (comme WhisperX)
         )
         
         logger.info(f"[{transcription_id}] ✅ Transcription service completed")
@@ -919,6 +925,7 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         )
         
         # Transcrit le segment
+        # ⚠️ NOTE: initial_prompt n'est PAS utilisé en mode distribué (uniquement mode classique)
         transcription_service = get_transcription_service(model_name=whisper_model)
         segment_path_obj = Path(segment_path)
         
@@ -928,6 +935,7 @@ def transcribe_segment_task(self, transcription_id: str, segment_path: str, segm
         text, segments_list, lang = transcription_service.transcribe_segment(
             segment_path_obj,
             use_vad=use_vad
+            # initial_prompt=None par défaut (non utilisé en mode distribué)
         )
         
         processing_time = round(time.time() - start_time, 2)
