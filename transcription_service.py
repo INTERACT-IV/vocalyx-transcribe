@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple, Optional
 from faster_whisper import WhisperModel
 from audio_utils import get_audio_duration, preprocess_audio, split_audio_intelligent
 from stereo_diarization import StereoDiarizationService
+from pyannote_diarization import PyannoteDiarizationService
 
 # Imports non utilisés (TimeoutError, signal, contextmanager) supprimés
 logger = logging.getLogger("vocalyx")
@@ -37,7 +38,8 @@ class TranscriptionService:
         
         # Lazy loading : les modèles seront chargés quand nécessaire
         self.model = None
-        self.diarization_service = None
+        self.stereo_diarization_service = None
+        self.pyannote_diarization_service = None
     
     def _load_model(self):
         """Charge le modèle Whisper"""
@@ -81,19 +83,27 @@ class TranscriptionService:
         best_of = getattr(self.config, 'best_of', self.config.beam_size)
         logger.info(f"⚙️ VAD: {self.config.vad_enabled} | Beam size: {self.config.beam_size} | Best of: {best_of}")
     
-    def _load_diarization_service(self):
-        """Charge le service de diarisation stéréo (seulement si nécessaire)"""
-        if self.diarization_service is not None:
-            return  # Déjà chargé
+    def _load_diarization_services(self):
+        """Charge les services de diarisation (stéréo + pyannote pour mono)"""
+        # Charger le service stéréo (toujours disponible, léger)
+        if self.stereo_diarization_service is None:
+            try:
+                logger.info("🎯 Initializing stereo diarization service (lightweight, no ML models)")
+                self.stereo_diarization_service = StereoDiarizationService(self.config)
+                logger.info("✅ Stereo diarization service initialized and ready")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize stereo diarization service: {e}")
+                self.stereo_diarization_service = None
         
-        try:
-            # Utiliser uniquement la diarisation stéréo (légère et rapide, sans modèle ML)
-            logger.info("🎯 Using stereo diarization (lightweight, no ML models)")
-            self.diarization_service = StereoDiarizationService(self.config)
-            logger.info("✅ Stereo diarization service initialized and ready")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to initialize diarization service: {e} (will be skipped if requested)")
-            self.diarization_service = None
+        # Charger le service pyannote pour mono (seulement si nécessaire, plus lourd)
+        if self.pyannote_diarization_service is None:
+            try:
+                logger.info("🎯 Initializing pyannote diarization service (for mono audio, like WhisperX)")
+                self.pyannote_diarization_service = PyannoteDiarizationService(self.config)
+                logger.info("✅ Pyannote diarization service initialized and ready")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize pyannote diarization service: {e} (mono diarization will be skipped)")
+                self.pyannote_diarization_service = None
         
     def transcribe_segment(self, file_path: Path, use_vad: bool = True, retry_without_vad: bool = True, initial_prompt: Optional[str] = None) -> Tuple[str, List[Dict], str]:
         """
@@ -356,10 +366,11 @@ class TranscriptionService:
             logger.info(f"{log_prefix}🔄 Loading Whisper model (lazy loading): {self.model_name}")
             self._load_model()
         
-        # Charger le service de diarisation seulement si nécessaire
-        if use_diarization and self.diarization_service is None:
-            logger.info(f"{log_prefix}🔄 Loading diarization service (lazy loading)...")
-            self._load_diarization_service()
+        # Charger les services de diarisation seulement si nécessaire
+        if use_diarization:
+            if self.stereo_diarization_service is None or self.pyannote_diarization_service is None:
+                logger.info(f"{log_prefix}🔄 Loading diarization services (lazy loading)...")
+                self._load_diarization_services()
         
         segment_paths = []
         processed_path_mono = None
@@ -411,35 +422,52 @@ class TranscriptionService:
                 full_text = text
                 language_detected = lang
             
-            # 5. Diarisation stéréo (si activée pour cette transcription)
+            # 5. Diarisation (stéréo ou mono selon le format audio)
             if use_diarization:
-                if self.diarization_service:
-                    logger.info(f"{log_prefix}🎤 Running speaker diarization...")
-                    try:
-                        # Utiliser la version stéréo pour la diarisation si disponible (optimal pour séparation des locuteurs)
-                        # Sinon utiliser la version mono
-                        diarization_audio_path = processed_path_stereo if processed_path_stereo else processed_path_mono
-                        if processed_path_stereo:
-                            logger.info(f"{log_prefix}🎯 Using STEREO audio for diarization (optimal: one channel per speaker)")
+                logger.info(f"{log_prefix}🎤 Running speaker diarization...")
+                try:
+                    # Choisir le service selon le format audio
+                    if is_stereo and processed_path_stereo:
+                        # Audio stéréo : utiliser la diarisation stéréo (légère et rapide)
+                        if self.stereo_diarization_service:
+                            logger.info(f"{log_prefix}🎯 Using STEREO diarization (lightweight: one channel per speaker)")
+                            diarization_audio_path = processed_path_stereo
+                            diarization_segments = self.stereo_diarization_service.diarize(diarization_audio_path)
+                            
+                            if diarization_segments:
+                                # Assigner les locuteurs aux segments de transcription
+                                full_segments = self.stereo_diarization_service.assign_speakers_to_segments(
+                                    full_segments,
+                                    diarization_segments
+                                )
+                                logger.info(f"{log_prefix}✅ Stereo diarization completed and assigned to segments")
+                            else:
+                                logger.warning(f"{log_prefix}⚠️ Stereo diarization returned no segments")
                         else:
-                            logger.info(f"{log_prefix}🎯 Using MONO audio for diarization")
-                        
-                        diarization_segments = self.diarization_service.diarize(diarization_audio_path)
-                        
-                        if diarization_segments:
-                            # Assigner les locuteurs aux segments de transcription
-                            full_segments = self.diarization_service.assign_speakers_to_segments(
-                                full_segments,
-                                diarization_segments
-                            )
-                            logger.info(f"{log_prefix}✅ Speaker diarization completed and assigned to segments")
+                            logger.warning(f"{log_prefix}⚠️ Stereo diarization requested but service not available")
+                    else:
+                        # Audio mono : utiliser la diarisation pyannote (comme WhisperX)
+                        if self.pyannote_diarization_service:
+                            logger.info(f"{log_prefix}🎯 Using PYANNOTE diarization for MONO audio (like WhisperX)")
+                            diarization_audio_path = processed_path_mono
+                            diarization_segments = self.pyannote_diarization_service.diarize(diarization_audio_path)
+                            
+                            if diarization_segments:
+                                # Assigner les locuteurs aux segments de transcription
+                                full_segments = self.pyannote_diarization_service.assign_speakers_to_segments(
+                                    full_segments,
+                                    diarization_segments
+                                )
+                                logger.info(f"{log_prefix}✅ Pyannote diarization completed and assigned to segments")
+                            else:
+                                logger.warning(f"{log_prefix}⚠️ Pyannote diarization returned no segments")
                         else:
-                            logger.warning(f"{log_prefix}⚠️ Diarization returned no segments")
-                    except Exception as e:
-                        logger.error(f"{log_prefix}❌ Error during diarization: {e}", exc_info=True)
-                        # Continuer sans diarisation en cas d'erreur
-                else:
-                    logger.warning(f"{log_prefix}⚠️ Diarization requested but service not available")
+                            logger.warning(f"{log_prefix}⚠️ Pyannote diarization requested but service not available (mono audio)")
+                except Exception as e:
+                    logger.error(f"{log_prefix}❌ Error during diarization: {e}", exc_info=True)
+                    # Continuer sans diarisation en cas d'erreur
+            else:
+                logger.info(f"{log_prefix}ℹ️ Diarization disabled for this transcription")
             
             processing_time = round(time.time() - start_time, 2)
             speed_ratio = round(original_duration / processing_time, 2) if processing_time > 0 else 0

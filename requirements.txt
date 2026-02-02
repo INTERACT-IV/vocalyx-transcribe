@@ -15,7 +15,11 @@ av==16.0.1
 soundfile==0.13.1
 pydub==0.25.1
 
-# Diarisation stéréo (légère, sans modèle ML - utilise uniquement pydub)
+# Diarisation
+# - Stéréo : légère, sans modèle ML (utilise uniquement pydub)
+# - Mono : pyannote.audio (comme WhisperX)
+pyannote.audio>=3.1.0
+scipy>=1.11.0  # Pour le resampling audio dans pyannote_diarization
 
 # Utilitaires
 python-dotenv==1.2.1

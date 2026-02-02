@@ -1,0 +1,264 @@
+"""
+vocalyx-transcribe/pyannote_diarization.py
+Service de diarisation basé sur pyannote.audio (comme WhisperX)
+
+Cette solution utilise un modèle ML pour la diarisation des fichiers audio MONO.
+Même implémentation que WhisperX pour garantir la compatibilité.
+
+AVANTAGES:
+- Fonctionne sur audio mono (contrairement à la diarisation stéréo)
+- Plus précis grâce au modèle ML
+- Compatible avec l'implémentation WhisperX
+
+INCONVÉNIENTS:
+- Plus lent que la diarisation stéréo (modèle ML)
+- Nécessite un modèle pyannote (téléchargé automatiquement)
+"""
+
+import logging
+from pathlib import Path
+from typing import List, Dict, Optional
+import numpy as np
+import torch
+
+try:
+    from pyannote.audio import Pipeline
+    PYANNOTE_AVAILABLE = True
+except ImportError:
+    PYANNOTE_AVAILABLE = False
+
+import soundfile as sf
+
+logger = logging.getLogger("vocalyx")
+
+# Sample rate attendu par pyannote (identique à WhisperX)
+SAMPLE_RATE = 16000
+
+
+def load_audio(audio_path: Path, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """
+    Charge un fichier audio et le convertit en numpy array.
+    Même fonction que WhisperX pour garantir la compatibilité.
+    
+    Args:
+        audio_path: Chemin vers le fichier audio
+        sample_rate: Sample rate cible (défaut: 16000)
+        
+    Returns:
+        numpy.ndarray: Audio en mono, normalisé entre -1 et 1
+    """
+    try:
+        # Charger avec soundfile (compatible avec WhisperX)
+        audio, sr = sf.read(str(audio_path))
+        
+        # Convertir en mono si stéréo (pyannote accepte mono et stéréo, mais on normalise en mono)
+        if len(audio.shape) > 1 and audio.shape[1] > 1:
+            audio = np.mean(audio, axis=1)
+        
+        # Resample si nécessaire
+        if sr != sample_rate:
+            from scipy import signal
+            num_samples = int(len(audio) * sample_rate / sr)
+            audio = signal.resample(audio, num_samples)
+        
+        # Normaliser entre -1 et 1
+        if audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+        
+        max_val = np.abs(audio).max()
+        if max_val > 0:
+            audio = audio / max_val
+        
+        return audio
+    except Exception as e:
+        logger.error(f"❌ Error loading audio {audio_path}: {e}", exc_info=True)
+        raise
+
+
+class PyannoteDiarizationService:
+    """
+    Service de diarisation basé sur pyannote.audio (comme WhisperX).
+    
+    Utilisé pour les fichiers audio MONO.
+    Même implémentation que WhisperX pour garantir la compatibilité.
+    """
+    
+    def __init__(self, config=None):
+        """
+        Initialise le service de diarisation pyannote.
+        
+        Args:
+            config: Configuration avec les paramètres pyannote
+        """
+        if not PYANNOTE_AVAILABLE:
+            raise ImportError(
+                "pyannote.audio is not installed. "
+                "Install it with: pip install pyannote.audio"
+            )
+        
+        self.config = config
+        
+        # Récupérer les paramètres de configuration
+        device_str = getattr(config, 'device', 'cpu')
+        if isinstance(device_str, str):
+            device = torch.device(device_str)
+        else:
+            device = device_str
+        
+        model_name = getattr(
+            config, 
+            'pyannote_model', 
+            'pyannote/speaker-diarization-3.1'
+        )
+        use_auth_token = getattr(config, 'pyannote_auth_token', None)
+        
+        # Paramètres optionnels pour la diarisation
+        self.num_speakers = getattr(config, 'pyannote_num_speakers', None)
+        self.min_speakers = getattr(config, 'pyannote_min_speakers', None)
+        self.max_speakers = getattr(config, 'pyannote_max_speakers', None)
+        
+        logger.info(f"🎯 Loading pyannote diarization model: {model_name}")
+        logger.info(f"📊 Device: {device}")
+        
+        try:
+            self.model = Pipeline.from_pretrained(
+                model_name, 
+                use_auth_token=use_auth_token
+            ).to(device)
+            logger.info("✅ Pyannote diarization service initialized and ready")
+        except Exception as e:
+            logger.error(f"❌ Failed to load pyannote model: {e}", exc_info=True)
+            raise
+    
+    def diarize(self, audio_path: Path) -> List[Dict[str, float]]:
+        """
+        Effectue la diarisation pyannote sur un fichier audio.
+        Même format de retour que StereoDiarizationService pour compatibilité.
+        
+        Args:
+            audio_path: Chemin vers le fichier audio (mono ou stéréo)
+            
+        Returns:
+            Liste de dictionnaires avec les segments de chaque locuteur:
+            [{"start": 0.0, "end": 5.2, "speaker": "SPEAKER_00"}, ...]
+        """
+        try:
+            logger.info(f"🎤 Running pyannote diarization on {audio_path.name}...")
+            
+            # Charger l'audio (même méthode que WhisperX)
+            audio = load_audio(audio_path, SAMPLE_RATE)
+            duration = len(audio) / SAMPLE_RATE
+            logger.info(f"📏 Audio duration: {duration:.1f}s")
+            
+            # Préparer les données pour pyannote (même format que WhisperX)
+            audio_data = {
+                'waveform': torch.from_numpy(audio[None, :]),  # Ajouter dimension batch
+                'sample_rate': SAMPLE_RATE
+            }
+            
+            # Exécuter la diarisation avec les paramètres optionnels
+            diarization = self.model(
+                audio_data,
+                num_speakers=self.num_speakers,
+                min_speakers=self.min_speakers,
+                max_speakers=self.max_speakers,
+            )
+            
+            # Convertir au format attendu (même que StereoDiarizationService)
+            diarization_segments = []
+            for segment, track, label in diarization.itertracks(yield_label=True):
+                diarization_segments.append({
+                    "start": round(segment.start, 2),
+                    "end": round(segment.end, 2),
+                    "speaker": label  # Format: "SPEAKER_00", "SPEAKER_01", etc.
+                })
+            
+            # Trier par timestamp de début
+            diarization_segments.sort(key=lambda x: x['start'])
+            
+            # Compter le nombre de locuteurs uniques
+            unique_speakers = set(seg["speaker"] for seg in diarization_segments)
+            logger.info(
+                f"✅ Pyannote diarization completed: {len(diarization_segments)} segments, "
+                f"{len(unique_speakers)} speaker(s) detected"
+            )
+            
+            return diarization_segments
+            
+        except Exception as e:
+            logger.error(f"❌ Error during pyannote diarization: {e}", exc_info=True)
+            return []
+    
+    def assign_speakers_to_segments(
+        self, 
+        transcription_segments: List[Dict], 
+        diarization_segments: List[Dict]
+    ) -> List[Dict]:
+        """
+        Assigne les locuteurs aux segments de transcription en fonction des timestamps.
+        Même implémentation que StereoDiarizationService pour compatibilité.
+        
+        Args:
+            transcription_segments: Segments de transcription avec start/end/text
+            diarization_segments: Segments de diarisation avec start/end/speaker
+            
+        Returns:
+            Segments de transcription avec le champ 'speaker' ajouté
+        """
+        if not diarization_segments:
+            logger.warning("⚠️ No diarization segments, skipping speaker assignment")
+            return transcription_segments
+        
+        # Créer une liste des segments avec speakers assignés
+        segments_with_speakers = []
+        
+        for trans_seg in transcription_segments:
+            trans_start = trans_seg["start"]
+            trans_end = trans_seg["end"]
+            trans_mid = (trans_start + trans_end) / 2.0
+            
+            # Trouver le locuteur qui parle au milieu du segment de transcription
+            speaker = None
+            max_overlap = 0.0
+            
+            for diar_seg in diarization_segments:
+                diar_start = diar_seg["start"]
+                diar_end = diar_seg["end"]
+                
+                # Calculer l'overlap entre le segment de transcription et le segment de diarisation
+                overlap_start = max(trans_start, diar_start)
+                overlap_end = min(trans_end, diar_end)
+                overlap = max(0.0, overlap_end - overlap_start)
+                
+                # Si le milieu du segment de transcription est dans ce segment de diarisation
+                if diar_start <= trans_mid <= diar_end:
+                    speaker = diar_seg["speaker"]
+                    break
+                
+                # Sinon, garder le segment avec le plus d'overlap
+                if overlap > max_overlap:
+                    max_overlap = overlap
+                    speaker = diar_seg["speaker"]
+            
+            # Si aucun locuteur trouvé, utiliser "UNKNOWN"
+            if speaker is None:
+                speaker = "UNKNOWN"
+            
+            # Créer le segment avec le speaker
+            seg_with_speaker = trans_seg.copy()
+            seg_with_speaker["speaker"] = speaker
+            segments_with_speakers.append(seg_with_speaker)
+        
+        logger.info(
+            f"✅ Assigned speakers to {len(segments_with_speakers)} transcription segments"
+        )
+        
+        return segments_with_speakers
+    
+    @property
+    def pipeline(self):
+        """
+        Propriété pour compatibilité avec l'interface de DiarizationService.
+        Retourne le pipeline pyannote.
+        """
+        return self.model

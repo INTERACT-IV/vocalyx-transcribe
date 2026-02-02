@@ -93,7 +93,13 @@ class Config:
             'enabled': 'false',
             # Paramètres pour diarisation stéréo (sans modèle ML)
             'stereo_silence_thresh': '-40',  # Seuil de silence pour la détection de voix (en dB)
-            'stereo_min_speech_ms': '250'  # Durée minimale de parole pour être considérée (en ms)
+            'stereo_min_speech_ms': '250',  # Durée minimale de parole pour être considérée (en ms)
+            # Paramètres pour diarisation pyannote (pour audio mono, comme WhisperX)
+            'pyannote_model': 'pyannote/speaker-diarization-3.1',  # Modèle pyannote à utiliser
+            'pyannote_auth_token': '',  # Token HuggingFace (optionnel, requis pour certains modèles)
+            'pyannote_num_speakers': '',  # Nombre exact de locuteurs (optionnel, None = auto)
+            'pyannote_min_speakers': '',  # Nombre minimum de locuteurs (optionnel)
+            'pyannote_max_speakers': ''  # Nombre maximum de locuteurs (optionnel)
         }
         
         config['LOGGING'] = {
@@ -261,7 +267,7 @@ class Config:
         )
         self.log_colored = log_colored_str.lower() in ['true', '1', 't']
         
-        # DIARIZATION (stéréo uniquement - sans modèle ML)
+        # DIARIZATION (stéréo pour stéréo, pyannote pour mono)
         diarization_enabled_str = os.environ.get(
             'DIARIZATION_ENABLED',
             self.config.get('DIARIZATION', 'enabled', fallback='false')
@@ -280,6 +286,37 @@ class Config:
             self.config.get('DIARIZATION', 'stereo_min_speech_ms', fallback='250')
         )
         self.stereo_diarization_min_speech_ms = int(min_speech_ms_str) if min_speech_ms_str.isdigit() else 250
+        
+        # Paramètres pour diarisation pyannote (pour audio mono, comme WhisperX)
+        self.pyannote_model = os.environ.get(
+            'PYANNOTE_MODEL',
+            self.config.get('DIARIZATION', 'pyannote_model', fallback='pyannote/speaker-diarization-3.1')
+        )
+        
+        pyannote_auth_token_str = os.environ.get(
+            'PYANNOTE_AUTH_TOKEN',
+            self.config.get('DIARIZATION', 'pyannote_auth_token', fallback='')
+        )
+        self.pyannote_auth_token = pyannote_auth_token_str if pyannote_auth_token_str else None
+        
+        # Paramètres optionnels pour le nombre de locuteurs
+        pyannote_num_speakers_str = os.environ.get(
+            'PYANNOTE_NUM_SPEAKERS',
+            self.config.get('DIARIZATION', 'pyannote_num_speakers', fallback='')
+        )
+        self.pyannote_num_speakers = int(pyannote_num_speakers_str) if pyannote_num_speakers_str.isdigit() else None
+        
+        pyannote_min_speakers_str = os.environ.get(
+            'PYANNOTE_MIN_SPEAKERS',
+            self.config.get('DIARIZATION', 'pyannote_min_speakers', fallback='')
+        )
+        self.pyannote_min_speakers = int(pyannote_min_speakers_str) if pyannote_min_speakers_str.isdigit() else None
+        
+        pyannote_max_speakers_str = os.environ.get(
+            'PYANNOTE_MAX_SPEAKERS',
+            self.config.get('DIARIZATION', 'pyannote_max_speakers', fallback='')
+        )
+        self.pyannote_max_speakers = int(pyannote_max_speakers_str) if pyannote_max_speakers_str.isdigit() else None
     
     def reload(self):
         """Recharge la configuration depuis le fichier"""
