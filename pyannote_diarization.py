@@ -634,6 +634,10 @@ class PyannoteDiarizationService:
         unique_diarization_speakers = set(seg["speaker"] for seg in diarization_segments)
         logger.info(f"🔍 Diarization segments: {len(diarization_segments)} segments with speakers: {unique_diarization_speakers}")
         
+        # Logger quelques exemples de segments de diarisation pour comprendre leur répartition
+        logger.debug(f"🔍 First few diarization segments: {diarization_segments[:5]}")
+        logger.debug(f"🔍 Last few diarization segments: {diarization_segments[-5:]}")
+        
         # Créer une liste des segments avec speakers assignés
         segments_with_speakers = []
         speaker_assignment_count = {}
@@ -646,6 +650,9 @@ class PyannoteDiarizationService:
             
             # Calculer l'intersection avec chaque segment de diarisation et grouper par speaker
             speaker_intersections = {}
+            
+            # Logger tous les segments de diarisation qui chevauchent ce segment de transcription
+            overlapping_diar_segments = []
             
             for diar_seg in diarization_segments:
                 diar_start = diar_seg["start"]
@@ -662,24 +669,37 @@ class PyannoteDiarizationService:
                     if speaker not in speaker_intersections:
                         speaker_intersections[speaker] = 0.0
                     speaker_intersections[speaker] += intersection
+                    overlapping_diar_segments.append({
+                        'speaker': speaker,
+                        'diar_start': diar_start,
+                        'diar_end': diar_end,
+                        'intersection': intersection
+                    })
             
-            # Logger pour debug sur quelques segments problématiques (où SPEAKER_01 devrait apparaître)
-            if len(speaker_intersections) > 1 and idx in [14, 15, 16, 25, 26, 27]:
+            # Logger pour TOUS les segments de transcription qui ont plusieurs speakers
+            if len(speaker_intersections) > 1:
                 logger.info(
                     f"🔍 Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
                     f"intersections by speaker: {speaker_intersections}"
                 )
-            
-            # Logger pour debug sur quelques segments problématiques (où SPEAKER_01 devrait apparaître)
-            if len(speaker_intersections) > 1 and idx in [14, 15, 16, 25, 26, 27]:
-                logger.info(
-                    f"🔍 Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
-                    f"intersections by speaker: {speaker_intersections}"
+                logger.debug(
+                    f"🔍   Overlapping diarization segments: {overlapping_diar_segments}"
+                )
+            elif len(speaker_intersections) == 0:
+                logger.warning(
+                    f"⚠️ Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
+                    f"No overlapping diarization segments found!"
                 )
             
             # Choisir le speaker avec la plus grande somme d'intersections (comme WhisperX)
             if speaker_intersections:
                 speaker = max(speaker_intersections.items(), key=lambda x: x[1])[0]
+                # Logger si on choisit SPEAKER_00 alors qu'il y a plusieurs speakers
+                if len(speaker_intersections) > 1 and speaker == "SPEAKER_00":
+                    logger.debug(
+                        f"🔍 Trans seg {idx}: Chose SPEAKER_00 with {speaker_intersections.get('SPEAKER_00', 0):.2f}s "
+                        f"over SPEAKER_01 with {speaker_intersections.get('SPEAKER_01', 0):.2f}s"
+                    )
             else:
                 # Si aucun overlap, utiliser "UNKNOWN"
                 speaker = "UNKNOWN"
