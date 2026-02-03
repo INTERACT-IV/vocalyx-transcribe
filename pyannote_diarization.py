@@ -22,6 +22,28 @@ from typing import List, Dict, Optional
 import numpy as np
 import torch
 
+# Configurer le cache HuggingFace AVANT l'import de pyannote
+# Les modèles pyannote seront dans /app/models/pyannote/ (même niveau que Whisper)
+pyannote_cache_base = Path("/app/models/pyannote")
+pyannote_cache_base.mkdir(parents=True, exist_ok=True)
+
+# HF_HOME doit pointer vers le répertoire qui contiendra le dossier 'hub/'
+os.environ['HF_HOME'] = str(pyannote_cache_base)
+os.environ['TRANSFORMERS_CACHE'] = str(pyannote_cache_base / 'transformers')
+os.environ['HF_DATASETS_CACHE'] = str(pyannote_cache_base / 'datasets')
+
+# S'assurer que le répertoire hub existe
+hub_dir = pyannote_cache_base / 'hub'
+hub_dir.mkdir(parents=True, exist_ok=True)
+
+# Forcer le cache via huggingface_hub si disponible (doit être fait avant l'import de pyannote)
+try:
+    import huggingface_hub
+    # Définir le cache_dir pour huggingface_hub
+    huggingface_hub.constants.HF_HOME = str(pyannote_cache_base)
+except ImportError:
+    pass  # huggingface_hub sera importé plus tard si nécessaire
+
 try:
     from pyannote.audio import Pipeline
     PYANNOTE_AVAILABLE = True
@@ -161,23 +183,20 @@ class PyannoteDiarizationService:
             'pyannote/speaker-diarization-3.1'
         )
         
-        # Configurer le cache des modèles pyannote pour utiliser le même répertoire que Whisper
-        # Les modèles Whisper sont dans /app/models/transcribe/
-        # On met les modèles pyannote dans /app/models/pyannote/
-        pyannote_cache_dir = Path("/app/models/pyannote")
-        pyannote_cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Configurer les variables d'environnement HuggingFace pour utiliser notre cache
-        # pyannote utilise HuggingFace pour télécharger les modèles
-        os.environ['HF_HOME'] = str(pyannote_cache_dir)
-        os.environ['TRANSFORMERS_CACHE'] = str(pyannote_cache_dir / 'transformers')
-        os.environ['HF_DATASETS_CACHE'] = str(pyannote_cache_dir / 'datasets')
+        # Le cache est déjà configuré au niveau du module (avant l'import de pyannote)
+        # Utiliser le répertoire de cache configuré globalement
+        pyannote_cache_dir = pyannote_cache_base
+        hub_dir = pyannote_cache_dir / 'hub'
         
         # Vérifier si le modèle existe déjà localement
-        # Les modèles HuggingFace sont généralement dans ~/.cache/huggingface/hub/models--pyannote--speaker-diarization-3.1
-        # On vérifie dans notre cache personnalisé
-        model_cache_path = pyannote_cache_dir / 'hub' / f'models--{model_name.replace("/", "--")}'
+        # Les modèles HuggingFace sont dans HF_HOME/hub/models--pyannote--speaker-diarization-3.1/
+        model_cache_name = model_name.replace("/", "--")
+        model_cache_path = hub_dir / f'models--{model_cache_name}'
         model_exists_locally = model_cache_path.exists() and any(model_cache_path.iterdir())
+        
+        logger.info(f"📁 Pyannote cache directory: {pyannote_cache_dir}")
+        logger.info(f"📁 Hub directory: {hub_dir}")
+        logger.info(f"📁 Model cache path: {model_cache_path}")
         
         if model_exists_locally:
             logger.info(f"✅ Pyannote model found locally at {model_cache_path}")
@@ -241,11 +260,22 @@ class PyannoteDiarizationService:
                 logger.info("🔍 Trying to load model with local_files_only=True")
             
             # Essayer d'abord avec 'token' (versions récentes)
+            # Essayer aussi avec cache_dir si supporté
             try:
-                self.model = Pipeline.from_pretrained(
-                    model_name,
-                    **pipeline_kwargs
-                ).to(device)
+                # Essayer avec cache_dir explicite (si supporté)
+                try:
+                    self.model = Pipeline.from_pretrained(
+                        model_name,
+                        cache_dir=str(self.pyannote_cache_dir),
+                        **pipeline_kwargs
+                    ).to(device)
+                except TypeError:
+                    # Si cache_dir n'est pas supporté, utiliser sans
+                    logger.debug("⚠️ cache_dir parameter not supported, using environment variables")
+                    self.model = Pipeline.from_pretrained(
+                        model_name,
+                        **pipeline_kwargs
+                    ).to(device)
             except (OSError, FileNotFoundError) as e:
                 # Si local_files_only=True et modèle non trouvé, réessayer sans
                 if self.model_exists_locally and pipeline_kwargs.get('local_files_only'):
@@ -270,6 +300,14 @@ class PyannoteDiarizationService:
                 elif "unexpected keyword argument 'local_files_only'" in str(e):
                     # Si local_files_only n'est pas supporté, réessayer sans
                     pipeline_kwargs.pop('local_files_only', None)
+                    self.model = Pipeline.from_pretrained(
+                        model_name,
+                        **pipeline_kwargs
+                    ).to(device)
+                elif "unexpected keyword argument 'cache_dir'" in str(e):
+                    # Si cache_dir n'est pas supporté, réessayer sans
+                    logger.debug("⚠️ cache_dir parameter not supported in this pyannote version")
+                    # Réessayer sans cache_dir mais avec les variables d'environnement
                     self.model = Pipeline.from_pretrained(
                         model_name,
                         **pipeline_kwargs
