@@ -362,12 +362,19 @@ class PyannoteDiarizationService:
             # Les versions récentes de pyannote retournent DiarizeOutput avec speaker_diarization ou exclusive_speaker_diarization
             else:
                 # Essayer d'abord les attributs les plus courants
+                # PRIORITÉ: speaker_diarization (avec chevauchements) > exclusive_speaker_diarization (sans chevauchements)
+                # speaker_diarization est préféré car il conserve tous les segments même en cas de chevauchement,
+                # ce qui permet une meilleure détection des speakers qui parlent en même temps ou rapidement
                 for attr_name in ['speaker_diarization', 'exclusive_speaker_diarization', 'annotation']:
                     try:
                         attr_value = getattr(diarization_result, attr_name, None)
                         if attr_value is not None and hasattr(attr_value, 'itertracks'):
                             diarization = attr_value
                             logger.debug(f"✅ Found Annotation via '{attr_name}' attribute")
+                            if attr_name == 'speaker_diarization':
+                                logger.info("✅ Using speaker_diarization (with overlaps) - better for detecting all speakers")
+                            elif attr_name == 'exclusive_speaker_diarization':
+                                logger.info("⚠️ Using exclusive_speaker_diarization (without overlaps) - may miss overlapping speakers")
                             break
                     except (AttributeError, TypeError):
                         continue
@@ -720,14 +727,52 @@ class PyannoteDiarizationService:
                 )
             
             # Choisir le speaker avec la plus grande somme d'intersections (comme WhisperX)
+            # AMÉLIORATION: Si plusieurs speakers ont des intersections similaires (différence < 30%),
+            # privilégier celui qui a le plus de segments distincts (meilleure couverture)
             if speaker_intersections:
-                speaker = max(speaker_intersections.items(), key=lambda x: x[1])[0]
-                # Logger si on choisit SPEAKER_00 alors qu'il y a plusieurs speakers
-                if len(speaker_intersections) > 1 and speaker == "SPEAKER_00":
-                    logger.info(
-                        f"🔍 Trans seg {idx}: Chose SPEAKER_00 with {speaker_intersections.get('SPEAKER_00', 0):.2f}s "
-                        f"over SPEAKER_01 with {speaker_intersections.get('SPEAKER_01', 0):.2f}s"
-                    )
+                if len(speaker_intersections) > 1:
+                    # Calculer les intersections par speaker
+                    sorted_speakers = sorted(speaker_intersections.items(), key=lambda x: x[1], reverse=True)
+                    best_speaker, best_intersection = sorted_speakers[0]
+                    second_speaker, second_intersection = sorted_speakers[1]
+                    
+                    # Si la différence est faible (< 30% de la meilleure intersection), 
+                    # vérifier le nombre de segments distincts pour chaque speaker
+                    intersection_ratio = second_intersection / best_intersection if best_intersection > 0 else 0
+                    
+                    if intersection_ratio > 0.7:  # Si le deuxième speaker a au moins 70% de l'intersection du premier
+                        # Compter les segments distincts pour chaque speaker dans cette zone
+                        speaker_segment_counts = {}
+                        for diar_seg in overlapping_diar_segments:
+                            speaker = diar_seg['speaker']
+                            if speaker in speaker_intersections:
+                                speaker_segment_counts[speaker] = speaker_segment_counts.get(speaker, 0) + 1
+                        
+                        # Si le deuxième speaker a plus de segments distincts, le choisir
+                        if second_speaker in speaker_segment_counts and best_speaker in speaker_segment_counts:
+                            if speaker_segment_counts[second_speaker] > speaker_segment_counts[best_speaker]:
+                                logger.info(
+                                    f"🔍 Trans seg {idx}: Close call! Chose {second_speaker} "
+                                    f"(intersection: {second_intersection:.2f}s, segments: {speaker_segment_counts[second_speaker]}) "
+                                    f"over {best_speaker} (intersection: {best_intersection:.2f}s, segments: {speaker_segment_counts[best_speaker]}) "
+                                    f"due to more distinct segments"
+                                )
+                                speaker = second_speaker
+                            else:
+                                speaker = best_speaker
+                        else:
+                            speaker = best_speaker
+                    else:
+                        speaker = best_speaker
+                    
+                    # Logger si on choisit SPEAKER_00 alors qu'il y a plusieurs speakers
+                    if speaker == "SPEAKER_00":
+                        logger.info(
+                            f"🔍 Trans seg {idx}: Chose SPEAKER_00 with {speaker_intersections.get('SPEAKER_00', 0):.2f}s "
+                            f"over SPEAKER_01 with {speaker_intersections.get('SPEAKER_01', 0):.2f}s"
+                        )
+                else:
+                    speaker = list(speaker_intersections.keys())[0]
             else:
                 # Si aucun overlap, utiliser "UNKNOWN"
                 speaker = "UNKNOWN"
