@@ -41,36 +41,85 @@ def load_audio(audio_path: Path, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     Charge un fichier audio et le convertit en numpy array.
     Même fonction que WhisperX pour garantir la compatibilité.
     
+    IMPORTANT: Pas de normalisation de volume (peak normalization) pour éviter la saturation.
+    WhisperX ne fait PAS de normalisation de volume, seulement conversion int16 -> float32.
+    La normalisation de volume peut causer des problèmes avec pyannote si le son est déjà fort.
+    
     Args:
         audio_path: Chemin vers le fichier audio
         sample_rate: Sample rate cible (défaut: 16000)
         
     Returns:
-        numpy.ndarray: Audio en mono, normalisé entre -1 et 1
+        numpy.ndarray: Audio en mono, en float32, valeurs entre -1 et 1 (sans normalisation de volume)
     """
     try:
-        # Charger avec soundfile (compatible avec WhisperX)
-        audio, sr = sf.read(str(audio_path))
+        # Essayer d'abord avec ffmpeg (comme WhisperX) si disponible
+        try:
+            import subprocess
+            cmd = [
+                "ffmpeg",
+                "-nostdin",
+                "-threads", "0",
+                "-i", str(audio_path),
+                "-f", "s16le",
+                "-ac", "1",  # Mono
+                "-acodec", "pcm_s16le",
+                "-ar", str(sample_rate),
+                "-",
+            ]
+            out = subprocess.run(cmd, capture_output=True, check=True).stdout
+            # Convertir int16 -> float32 comme WhisperX (division par 32768.0)
+            audio = np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+            logger.debug("✅ Loaded audio with ffmpeg (like WhisperX)")
+            return audio
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # Fallback: utiliser soundfile si ffmpeg n'est pas disponible
+            logger.debug("⚠️ ffmpeg not available, using soundfile as fallback")
+            pass
         
-        # Convertir en mono si stéréo (pyannote accepte mono et stéréo, mais on normalise en mono)
-        if len(audio.shape) > 1 and audio.shape[1] > 1:
-            audio = np.mean(audio, axis=1)
+        # Fallback avec soundfile (compatible avec WhisperX)
+        # IMPORTANT: Ne PAS utiliser dtype=np.float32 directement car cela peut normaliser automatiquement
+        # On lit en int16 puis on convertit manuellement comme WhisperX
+        try:
+            # Essayer de lire en int16 d'abord (comme WhisperX)
+            audio, sr = sf.read(str(audio_path), dtype=np.int16)
+            # Convertir en mono si stéréo
+            if len(audio.shape) > 1 and audio.shape[1] > 1:
+                audio = np.mean(audio, axis=1)
+            # Convertir int16 -> float32 comme WhisperX
+            audio = audio.astype(np.float32) / 32768.0
+        except (ValueError, TypeError):
+            # Si le fichier n'est pas en int16, lire directement en float32
+            audio, sr = sf.read(str(audio_path), dtype=np.float32)
+            # Convertir en mono si stéréo
+            if len(audio.shape) > 1 and audio.shape[1] > 1:
+                audio = np.mean(audio, axis=1)
+            # Ne PAS normaliser - garder les valeurs telles quelles (comme WhisperX)
+            # soundfile.read() avec dtype=np.float32 retourne déjà des valeurs entre -1 et 1
         
-        # Resample si nécessaire
+        # Resample si nécessaire (comme WhisperX)
         if sr != sample_rate:
             from scipy import signal
             num_samples = int(len(audio) * sample_rate / sr)
-            audio = signal.resample(audio, num_samples)
+            audio = signal.resample(audio, num_samples).astype(np.float32)
         
-        # Normaliser entre -1 et 1
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
+        # IMPORTANT: Ne PAS faire de normalisation de volume (peak normalization)
+        # WhisperX ne le fait pas, et cela peut causer de la saturation si le son est déjà fort
         
+        # Vérifier que les valeurs sont dans une plage raisonnable (pas de saturation)
         max_val = np.abs(audio).max()
-        if max_val > 0:
-            audio = audio / max_val
+        if max_val > 1.0:
+            logger.warning(
+                f"⚠️ Audio values exceed [-1, 1] range (max: {max_val:.3f}). "
+                f"This might indicate saturation. Clamping to [-1, 1]."
+            )
+            audio = np.clip(audio, -1.0, 1.0)
+        elif max_val > 0.95:
+            logger.debug(
+                f"🔍 Audio is close to saturation (max: {max_val:.3f})"
+            )
         
-        return audio
+        return audio.astype(np.float32)
     except Exception as e:
         logger.error(f"❌ Error loading audio {audio_path}: {e}", exc_info=True)
         raise

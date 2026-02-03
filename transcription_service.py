@@ -449,7 +449,11 @@ class TranscriptionService:
                         # Audio mono : utiliser la diarisation pyannote (comme WhisperX)
                         if self.pyannote_diarization_service:
                             logger.info(f"{log_prefix}🎯 Using PYANNOTE diarization for MONO audio (like WhisperX)")
-                            diarization_audio_path = processed_path_mono
+                            # IMPORTANT: Utiliser le fichier original pour la diarisation pyannote
+                            # (comme WhisperX) pour éviter les problèmes de saturation dus à la normalisation
+                            # Le load_audio de pyannote_diarization.py gère la conversion sans normalisation de volume
+                            diarization_audio_path = file_path  # Utiliser l'original, pas le préprocessé
+                            logger.info(f"{log_prefix}📁 Using original audio file for pyannote (no volume normalization, like WhisperX)")
                             diarization_segments = self.pyannote_diarization_service.diarize(diarization_audio_path)
                             
                             if diarization_segments:
