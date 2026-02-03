@@ -36,13 +36,9 @@ os.environ['HF_DATASETS_CACHE'] = str(pyannote_cache_base / 'datasets')
 hub_dir = pyannote_cache_base / 'hub'
 hub_dir.mkdir(parents=True, exist_ok=True)
 
-# Forcer le cache via huggingface_hub si disponible (doit être fait avant l'import de pyannote)
-try:
-    import huggingface_hub
-    # Définir le cache_dir pour huggingface_hub
-    huggingface_hub.constants.HF_HOME = str(pyannote_cache_base)
-except ImportError:
-    pass  # huggingface_hub sera importé plus tard si nécessaire
+# Note: Les variables d'environnement HF_HOME, TRANSFORMERS_CACHE et HF_DATASETS_CACHE
+# sont suffisantes pour configurer le cache HuggingFace. Pas besoin d'accéder directement
+# à huggingface_hub.constants qui peut ne pas exister dans toutes les versions.
 
 try:
     from pyannote.audio import Pipeline
