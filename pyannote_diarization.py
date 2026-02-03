@@ -358,28 +358,34 @@ class PyannoteDiarizationService:
             if hasattr(diarization_result, 'itertracks'):
                 diarization = diarization_result
                 logger.debug("✅ Using direct Annotation format")
-            # 2. Essayer d'accéder directement à l'attribut 'annotation' (DiarizeOutput)
-            # Même si hasattr retourne False, l'attribut peut exister via __getattr__
+            # 2. Essayer d'accéder directement aux attributs communs de DiarizeOutput
+            # Les versions récentes de pyannote retournent DiarizeOutput avec speaker_diarization ou exclusive_speaker_diarization
             else:
-                try:
-                    # Essayer directement l'accès à l'attribut
-                    diarization = diarization_result.annotation
-                    if hasattr(diarization, 'itertracks'):
-                        logger.debug("✅ Using DiarizeOutput.annotation (direct access)")
-                except AttributeError:
-                    # Si l'attribut n'existe pas, essayer getattr
+                # Essayer d'abord les attributs les plus courants
+                for attr_name in ['speaker_diarization', 'exclusive_speaker_diarization', 'annotation']:
                     try:
-                        diarization = getattr(diarization_result, 'annotation', None)
-                        if diarization and hasattr(diarization, 'itertracks'):
-                            logger.debug("✅ Found annotation via getattr")
-                    except:
+                        attr_value = getattr(diarization_result, attr_name, None)
+                        if attr_value is not None and hasattr(attr_value, 'itertracks'):
+                            diarization = attr_value
+                            logger.debug(f"✅ Found Annotation via '{attr_name}' attribute")
+                            break
+                    except (AttributeError, TypeError):
+                        continue
+                
+                # Si toujours None, essayer l'accès direct à .annotation (peut lever AttributeError)
+                if diarization is None:
+                    try:
+                        diarization = diarization_result.annotation
+                        if hasattr(diarization, 'itertracks'):
+                            logger.debug("✅ Using DiarizeOutput.annotation (direct access)")
+                    except AttributeError:
                         pass
             
             # Si toujours None, logger pour debug et essayer toutes les méthodes possibles
             if diarization is None:
-                logger.warning(f"⚠️ Could not find Annotation in result type: {type(diarization_result)}")
+                logger.debug(f"🔍 Could not find Annotation directly, searching in DiarizeOutput attributes...")
                 all_attrs = [a for a in dir(diarization_result) if not a.startswith('_')]
-                logger.info(f"🔍 Available attributes: {all_attrs}")
+                logger.debug(f"🔍 Available attributes: {all_attrs}")
                 
                 # Essayer d'accéder aux attributs qui contiennent l'annotation
                 # Priorité: speaker_diarization (standard avec chevauchements) > exclusive_speaker_diarization (sans chevauchements)
@@ -389,6 +395,7 @@ class PyannoteDiarizationService:
                     if attr_name in all_attrs:
                         try:
                             attr_value = getattr(diarization_result, attr_name)
+                            logger.debug(f"🔍 Checking attribute '{attr_name}': type={type(attr_value)}, has_itertracks={hasattr(attr_value, 'itertracks') if attr_value is not None else False}")
                             if attr_value is not None and hasattr(attr_value, 'itertracks'):
                                 diarization = attr_value
                                 logger.info(f"✅ Found Annotation in attribute '{attr_name}'")
