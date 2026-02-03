@@ -496,7 +496,10 @@ def _transcribe_classic_mode(self, transcription_id: str, file_path: str, transc
             if seg.get('text', '').strip()  # Ignorer les segments vides
         ]
         
-        api_client.update_transcription(transcription_id, {
+        logger.info(f"[{transcription_id}] 📝 Generated text_list with {len(text_list)} entries")
+        logger.debug(f"[{transcription_id}] 📝 text_list preview: {text_list[:3]}...")
+        
+        update_data = {
             "status": status,
             "text": result["text"],
             "segments": json.dumps(result["segments"]),
@@ -507,7 +510,10 @@ def _transcribe_classic_mode(self, transcription_id: str, file_path: str, transc
             "segments_count": len(result["segments"]),
             "queue_wait_time": queue_wait_time,  # ✅ NOUVEAU
             "processing_end_time": processing_end_datetime.isoformat()  # ✅ NOUVEAU
-        })
+        }
+        
+        logger.debug(f"[{transcription_id}] 📤 Sending update to API with fields: {list(update_data.keys())}")
+        api_client.update_transcription(transcription_id, update_data)
         
         logger.info(f"[{transcription_id}] 💾 Results saved to API (status: {status})")
         
@@ -1635,7 +1641,10 @@ def aggregate_segments_task(self, transcription_id: str):
             if seg.get('text', '').strip()  # Ignorer les segments vides
         ]
         
-        api_client.update_transcription(transcription_id, {
+        logger.info(f"[{transcription_id}] 📝 Generated text_list with {len(text_list)} entries")
+        logger.debug(f"[{transcription_id}] 📝 text_list preview: {text_list[:3]}...")
+        
+        update_data = {
             "status": status,
             "text": full_text.strip(),
             "segments": json.dumps(all_segments),
@@ -1646,7 +1655,10 @@ def aggregate_segments_task(self, transcription_id: str):
             "segments_count": len(all_segments),
             "queue_wait_time": queue_wait_time,  # ✅ NOUVEAU
             "processing_end_time": processing_end_datetime.isoformat()  # ✅ NOUVEAU
-        })
+        }
+        
+        logger.debug(f"[{transcription_id}] 📤 Sending update to API with fields: {list(update_data.keys())}")
+        api_client.update_transcription(transcription_id, update_data)
         
         logger.info(
             f"[{transcription_id}] ✅ DISTRIBUTED AGGREGATION | Step 3/3: Aggregation completed | "
