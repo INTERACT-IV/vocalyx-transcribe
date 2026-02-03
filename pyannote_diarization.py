@@ -442,8 +442,23 @@ class PyannoteDiarizationService:
             unique_speakers = set(seg["speaker"] for seg in diarization_segments)
             logger.info(
                 f"✅ Pyannote diarization completed: {len(diarization_segments)} segments, "
-                f"{len(unique_speakers)} speaker(s) detected"
+                f"{len(unique_speakers)} speaker(s) detected: {sorted(unique_speakers)}"
             )
+            
+            # Logger quelques exemples de segments pour vérifier les speakers
+            if len(unique_speakers) > 1:
+                # Logger un exemple de chaque speaker
+                for speaker_id in sorted(unique_speakers):
+                    example_seg = next((s for s in diarization_segments if s["speaker"] == speaker_id), None)
+                    if example_seg:
+                        logger.debug(f"🔍 Example segment for {speaker_id}: {example_seg['start']:.2f}s - {example_seg['end']:.2f}s")
+            
+            # Logger la distribution des speakers
+            speaker_distribution = {}
+            for seg in diarization_segments:
+                speaker = seg["speaker"]
+                speaker_distribution[speaker] = speaker_distribution.get(speaker, 0) + 1
+            logger.debug(f"🔍 Speaker distribution in diarization: {speaker_distribution}")
             
             return diarization_segments
             
@@ -471,17 +486,25 @@ class PyannoteDiarizationService:
             logger.warning("⚠️ No diarization segments, skipping speaker assignment")
             return transcription_segments
         
+        # Logger les segments de diarisation pour debug
+        unique_diarization_speakers = set(seg["speaker"] for seg in diarization_segments)
+        logger.info(f"🔍 Diarization segments: {len(diarization_segments)} segments with speakers: {unique_diarization_speakers}")
+        logger.debug(f"🔍 First few diarization segments: {diarization_segments[:5]}")
+        
         # Créer une liste des segments avec speakers assignés
         segments_with_speakers = []
+        speaker_assignment_count = {}
         
         for trans_seg in transcription_segments:
             trans_start = trans_seg["start"]
             trans_end = trans_seg["end"]
             trans_mid = (trans_start + trans_end) / 2.0
             
-            # Trouver le locuteur qui parle au milieu du segment de transcription
+            # Trouver le locuteur qui parle dans ce segment de transcription
+            # Stratégie améliorée : utiliser le segment de diarisation avec le plus grand overlap
             speaker = None
             max_overlap = 0.0
+            best_diar_seg = None
             
             for diar_seg in diarization_segments:
                 diar_start = diar_seg["start"]
@@ -492,15 +515,35 @@ class PyannoteDiarizationService:
                 overlap_end = min(trans_end, diar_end)
                 overlap = max(0.0, overlap_end - overlap_start)
                 
-                # Si le milieu du segment de transcription est dans ce segment de diarisation
-                if diar_start <= trans_mid <= diar_end:
-                    speaker = diar_seg["speaker"]
-                    break
-                
-                # Sinon, garder le segment avec le plus d'overlap
-                if overlap > max_overlap:
-                    max_overlap = overlap
-                    speaker = diar_seg["speaker"]
+                # Si il y a un overlap, garder le segment avec le plus grand overlap
+                if overlap > 0:
+                    if overlap > max_overlap:
+                        max_overlap = overlap
+                        speaker = diar_seg["speaker"]
+                        best_diar_seg = diar_seg
+                    # Si le point médian est dans ce segment, c'est un bon candidat
+                    elif diar_start <= trans_mid <= diar_end and overlap == max_overlap:
+                        # En cas d'égalité, préférer celui qui contient le point médian
+                        speaker = diar_seg["speaker"]
+                        best_diar_seg = diar_seg
+            
+            # Si aucun overlap trouvé, essayer de trouver le segment de diarisation le plus proche
+            if speaker is None:
+                min_distance = float('inf')
+                for diar_seg in diarization_segments:
+                    diar_start = diar_seg["start"]
+                    diar_end = diar_seg["end"]
+                    # Calculer la distance entre le segment de transcription et le segment de diarisation
+                    if trans_end < diar_start:
+                        distance = diar_start - trans_end
+                    elif trans_start > diar_end:
+                        distance = trans_start - diar_end
+                    else:
+                        distance = 0  # Il y a un chevauchement (devrait avoir été capturé avant)
+                    
+                    if distance < min_distance:
+                        min_distance = distance
+                        speaker = diar_seg["speaker"]
             
             # Si aucun locuteur trouvé, utiliser "UNKNOWN"
             if speaker is None:
@@ -510,10 +553,23 @@ class PyannoteDiarizationService:
             seg_with_speaker = trans_seg.copy()
             seg_with_speaker["speaker"] = speaker
             segments_with_speakers.append(seg_with_speaker)
+            
+            # Compter les assignations par speaker
+            speaker_assignment_count[speaker] = speaker_assignment_count.get(speaker, 0) + 1
         
         logger.info(
             f"✅ Assigned speakers to {len(segments_with_speakers)} transcription segments"
         )
+        logger.info(f"🔍 Speaker assignment distribution: {speaker_assignment_count}")
+        
+        # Vérifier si tous les segments ont le même speaker (problème potentiel)
+        assigned_speakers = set(seg["speaker"] for seg in segments_with_speakers)
+        if len(assigned_speakers) == 1 and len(unique_diarization_speakers) > 1:
+            logger.warning(
+                f"⚠️ WARNING: All transcription segments assigned to {assigned_speakers}, "
+                f"but diarization detected {len(unique_diarization_speakers)} speakers: {unique_diarization_speakers}"
+            )
+            logger.warning(f"⚠️ This might indicate a problem with speaker assignment logic")
         
         return segments_with_speakers
     
