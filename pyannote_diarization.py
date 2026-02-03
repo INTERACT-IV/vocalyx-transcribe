@@ -635,8 +635,28 @@ class PyannoteDiarizationService:
         logger.info(f"🔍 Diarization segments: {len(diarization_segments)} segments with speakers: {unique_diarization_speakers}")
         
         # Logger quelques exemples de segments de diarisation pour comprendre leur répartition
-        logger.debug(f"🔍 First few diarization segments: {diarization_segments[:5]}")
-        logger.debug(f"🔍 Last few diarization segments: {diarization_segments[-5:]}")
+        logger.info(f"🔍 First few diarization segments: {diarization_segments[:5]}")
+        logger.info(f"🔍 Last few diarization segments: {diarization_segments[-5:]}")
+        
+        # Logger la répartition temporelle par speaker
+        for speaker_id in sorted(unique_diarization_speakers):
+            speaker_segments = [s for s in diarization_segments if s["speaker"] == speaker_id]
+            if speaker_segments:
+                first_seg = speaker_segments[0]
+                last_seg = speaker_segments[-1]
+                total_duration = sum(s["end"] - s["start"] for s in speaker_segments)
+                logger.info(
+                    f"🔍 {speaker_id}: {len(speaker_segments)} segments, "
+                    f"first: [{first_seg['start']:.2f}-{first_seg['end']:.2f}], "
+                    f"last: [{last_seg['start']:.2f}-{last_seg['end']:.2f}], "
+                    f"total duration: {total_duration:.2f}s"
+                )
+        
+        # Logger les segments de transcription pour comparaison
+        logger.info(f"🔍 Transcription segments: {len(transcription_segments)} segments")
+        if transcription_segments:
+            logger.info(f"🔍 First transcription segment: {transcription_segments[0]}")
+            logger.info(f"🔍 Last transcription segment: {transcription_segments[-1]}")
         
         # Créer une liste des segments avec speakers assignés
         segments_with_speakers = []
@@ -676,15 +696,23 @@ class PyannoteDiarizationService:
                         'intersection': intersection
                     })
             
+            # Logger pour les premiers et derniers segments de transcription
+            if idx < 2 or idx >= len(transcription_segments) - 2:
+                logger.info(
+                    f"🔍 Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
+                    f"intersections by speaker: {speaker_intersections}, "
+                    f"overlapping diar segments: {len(overlapping_diar_segments)}"
+                )
+                if overlapping_diar_segments:
+                    logger.info(f"🔍   Overlapping diarization details (first 3): {overlapping_diar_segments[:3]}")
+            
             # Logger pour TOUS les segments de transcription qui ont plusieurs speakers
             if len(speaker_intersections) > 1:
                 logger.info(
                     f"🔍 Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
-                    f"intersections by speaker: {speaker_intersections}"
+                    f"MULTIPLE SPEAKERS detected! intersections: {speaker_intersections}"
                 )
-                logger.debug(
-                    f"🔍   Overlapping diarization segments: {overlapping_diar_segments}"
-                )
+                logger.info(f"🔍   Overlapping diarization segments: {overlapping_diar_segments}")
             elif len(speaker_intersections) == 0:
                 logger.warning(
                     f"⚠️ Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
@@ -696,7 +724,7 @@ class PyannoteDiarizationService:
                 speaker = max(speaker_intersections.items(), key=lambda x: x[1])[0]
                 # Logger si on choisit SPEAKER_00 alors qu'il y a plusieurs speakers
                 if len(speaker_intersections) > 1 and speaker == "SPEAKER_00":
-                    logger.debug(
+                    logger.info(
                         f"🔍 Trans seg {idx}: Chose SPEAKER_00 with {speaker_intersections.get('SPEAKER_00', 0):.2f}s "
                         f"over SPEAKER_01 with {speaker_intersections.get('SPEAKER_01', 0):.2f}s"
                     )
