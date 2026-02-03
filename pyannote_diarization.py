@@ -238,13 +238,81 @@ class PyannoteDiarizationService:
                     except:
                         pass
             
-            # Si toujours None, logger pour debug
+            # Si toujours None, logger pour debug et essayer toutes les méthodes possibles
             if diarization is None:
                 logger.warning(f"⚠️ Could not find Annotation in result type: {type(diarization_result)}")
-                logger.debug(f"🔍 Available attributes: {[a for a in dir(diarization_result) if not a.startswith('_')]}")
-                # Essayer d'utiliser directement le résultat si c'est itérable
-                if hasattr(diarization_result, '__iter__') and not isinstance(diarization_result, (str, bytes)):
-                    diarization = diarization_result
+                all_attrs = [a for a in dir(diarization_result) if not a.startswith('_')]
+                logger.info(f"🔍 Available attributes: {all_attrs}")
+                
+                # Essayer d'accéder à tous les attributs possibles qui pourraient contenir l'annotation
+                for attr_name in all_attrs:
+                    try:
+                        attr_value = getattr(diarization_result, attr_name)
+                        if attr_value is not None and hasattr(attr_value, 'itertracks'):
+                            diarization = attr_value
+                            logger.info(f"✅ Found Annotation in attribute '{attr_name}'")
+                            break
+                        elif attr_name.lower() in ['annotation', 'diarization', 'result', 'output']:
+                            # Ces attributs sont suspects, logger leur type
+                            logger.info(f"🔍 Attribute '{attr_name}' type: {type(attr_value)}, value: {attr_value}")
+                            if hasattr(attr_value, 'itertracks'):
+                                diarization = attr_value
+                                logger.info(f"✅ Found Annotation in attribute '{attr_name}'")
+                                break
+                    except Exception as e:
+                        logger.debug(f"⚠️ Could not access attribute '{attr_name}': {e}")
+                        continue
+                
+                # Essayer aussi l'accès par index si c'est un tuple ou NamedTuple
+                if diarization is None:
+                    try:
+                        if hasattr(diarization_result, '_fields'):  # NamedTuple
+                            logger.info(f"🔍 DiarizeOutput appears to be a NamedTuple with fields: {diarization_result._fields}")
+                            # Essayer d'accéder au premier champ (généralement l'annotation)
+                            if len(diarization_result._fields) > 0:
+                                first_field = diarization_result._fields[0]
+                                first_value = getattr(diarization_result, first_field)
+                                logger.info(f"🔍 First field '{first_field}' type: {type(first_value)}")
+                                if hasattr(first_value, 'itertracks'):
+                                    diarization = first_value
+                                    logger.info(f"✅ Found Annotation in NamedTuple field '{first_field}'")
+                        elif hasattr(diarization_result, '__getitem__'):
+                            # Essayer l'accès par index
+                            try:
+                                indexed_value = diarization_result[0]
+                                if hasattr(indexed_value, 'itertracks'):
+                                    diarization = indexed_value
+                                    logger.info("✅ Found Annotation via index [0]")
+                            except (IndexError, TypeError):
+                                pass
+                    except Exception as e:
+                        logger.debug(f"⚠️ Error trying NamedTuple/index access: {e}")
+                
+                # Si toujours None, essayer d'utiliser directement le résultat si c'est itérable
+                if diarization is None:
+                    # Vérifier si DiarizeOutput peut être converti directement
+                    try:
+                        # Essayer de convertir en dict ou d'accéder comme un dict
+                        if hasattr(diarization_result, '_asdict'):
+                            # NamedTuple avec _asdict
+                            result_dict = diarization_result._asdict()
+                            logger.info(f"🔍 Converted to dict: {list(result_dict.keys())}")
+                            # Chercher 'annotation' dans le dict
+                            if 'annotation' in result_dict:
+                                diarization = result_dict['annotation']
+                                logger.info("✅ Found annotation in _asdict()")
+                        elif isinstance(diarization_result, (list, tuple)) and len(diarization_result) > 0:
+                            # C'est peut-être directement un tuple/list avec l'annotation en premier
+                            first_item = diarization_result[0]
+                            if hasattr(first_item, 'itertracks'):
+                                diarization = first_item
+                                logger.info("✅ Found Annotation as first item in tuple/list")
+                    except Exception as e:
+                        logger.debug(f"⚠️ Error in conversion attempts: {e}")
+                    
+                    # Dernier recours : essayer d'itérer directement
+                    if diarization is None and hasattr(diarization_result, '__iter__') and not isinstance(diarization_result, (str, bytes)):
+                        diarization = diarization_result
             
             # Convertir au format attendu (même que StereoDiarizationService)
             diarization_segments = []
