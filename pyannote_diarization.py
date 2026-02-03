@@ -748,11 +748,50 @@ class PyannoteDiarizationService:
         # Vérifier si tous les segments ont le même speaker (problème potentiel)
         assigned_speakers = set(seg["speaker"] for seg in segments_with_speakers)
         if len(assigned_speakers) == 1 and len(unique_diarization_speakers) > 1:
+            # Calculer la couverture temporelle de la transcription
+            if transcription_segments:
+                trans_start = min(seg["start"] for seg in transcription_segments)
+                trans_end = max(seg["end"] for seg in transcription_segments)
+            else:
+                trans_start = trans_end = 0.0
+            
+            # Trouver les segments de diarisation non couverts
+            uncovered_speakers = []
+            for speaker_id in unique_diarization_speakers:
+                if speaker_id not in assigned_speakers:
+                    speaker_segments = [s for s in diarization_segments if s["speaker"] == speaker_id]
+                    uncovered_duration = sum(s["end"] - s["start"] for s in speaker_segments)
+                    uncovered_segments = [s for s in speaker_segments if s["end"] > trans_end or s["start"] < trans_start]
+                    if uncovered_segments:
+                        uncovered_speakers.append({
+                            'speaker': speaker_id,
+                            'segments': len(uncovered_segments),
+                            'duration': uncovered_duration,
+                            'first_segment': uncovered_segments[0],
+                            'last_segment': uncovered_segments[-1]
+                        })
+            
             logger.warning(
                 f"⚠️ WARNING: All transcription segments assigned to {assigned_speakers}, "
                 f"but diarization detected {len(unique_diarization_speakers)} speakers: {unique_diarization_speakers}"
             )
-            logger.warning(f"⚠️ This might indicate a problem with speaker assignment logic")
+            if uncovered_speakers:
+                logger.warning(
+                    f"⚠️ Transcription coverage: [{trans_start:.2f}s - {trans_end:.2f}s], "
+                    f"but {len(uncovered_speakers)} speaker(s) have segments outside this range:"
+                )
+                for uc in uncovered_speakers:
+                    logger.warning(
+                        f"⚠️   {uc['speaker']}: {uc['segments']} segments ({uc['duration']:.2f}s), "
+                        f"first: [{uc['first_segment']['start']:.2f}-{uc['first_segment']['end']:.2f}], "
+                        f"last: [{uc['last_segment']['start']:.2f}-{uc['last_segment']['end']:.2f}]"
+                    )
+                logger.warning(
+                    f"⚠️ This suggests VAD/Whisper skipped these audio regions. "
+                    f"Consider adjusting VAD parameters (threshold, min_speech_duration_ms) or disabling VAD."
+                )
+            else:
+                logger.warning(f"⚠️ This might indicate a problem with speaker assignment logic")
         
         return segments_with_speakers
     

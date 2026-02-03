@@ -489,10 +489,18 @@ def _transcribe_classic_mode(self, transcription_id: str, file_path: str, transc
         # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
         processing_end_datetime = datetime.utcnow()
         
+        # Générer text_list pour la visibilité (format: ["SPEAKER_00: texte", "SPEAKER_01: texte", ...])
+        text_list = [
+            f"{seg.get('speaker', 'UNKNOWN')}: {seg.get('text', '').strip()}"
+            for seg in result["segments"]
+            if seg.get('text', '').strip()  # Ignorer les segments vides
+        ]
+        
         api_client.update_transcription(transcription_id, {
             "status": status,
             "text": result["text"],
             "segments": json.dumps(result["segments"]),
+            "text_list": json.dumps(text_list),  # ✅ NOUVEAU : Liste formatée pour la visibilité
             "language": result["language"],
             "duration": result["duration"],
             "processing_time": processing_time,
@@ -1620,10 +1628,18 @@ def aggregate_segments_task(self, transcription_id: str):
         # ✅ datetime est déjà importé au niveau du module, on peut l'utiliser directement
         processing_end_datetime = datetime.utcnow()
         
+        # Générer text_list pour la visibilité (format: ["SPEAKER_00: texte", "SPEAKER_01: texte", ...])
+        text_list = [
+            f"{seg.get('speaker', 'UNKNOWN')}: {seg.get('text', '').strip()}"
+            for seg in all_segments
+            if seg.get('text', '').strip()  # Ignorer les segments vides
+        ]
+        
         api_client.update_transcription(transcription_id, {
             "status": status,
             "text": full_text.strip(),
             "segments": json.dumps(all_segments),
+            "text_list": json.dumps(text_list),  # ✅ NOUVEAU : Liste formatée pour la visibilité
             "language": language_detected,
             "duration": metadata.get('original_duration', 0.0),
             "processing_time": total_processing_time,
