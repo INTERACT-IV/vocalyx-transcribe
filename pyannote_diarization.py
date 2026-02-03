@@ -205,21 +205,156 @@ class PyannoteDiarizationService:
             }
             
             # Exécuter la diarisation avec les paramètres optionnels
-            diarization = self.model(
+            diarization_result = self.model(
                 audio_data,
                 num_speakers=self.num_speakers,
                 min_speakers=self.min_speakers,
                 max_speakers=self.max_speakers,
             )
             
+            # Gérer différents formats de retour selon la version de pyannote.audio
+            # Les versions récentes peuvent retourner DiarizeOutput au lieu d'Annotation directement
+            diarization = None
+            
+            # Essayer différentes méthodes pour accéder à l'Annotation
+            # 1. Vérifier si c'est directement une Annotation (format classique)
+            if hasattr(diarization_result, 'itertracks'):
+                diarization = diarization_result
+                logger.debug("✅ Using direct Annotation format")
+            # 2. Essayer d'accéder directement à l'attribut 'annotation' (DiarizeOutput)
+            # Même si hasattr retourne False, l'attribut peut exister via __getattr__
+            else:
+                try:
+                    # Essayer directement l'accès à l'attribut
+                    diarization = diarization_result.annotation
+                    if hasattr(diarization, 'itertracks'):
+                        logger.debug("✅ Using DiarizeOutput.annotation (direct access)")
+                except AttributeError:
+                    # Si l'attribut n'existe pas, essayer getattr
+                    try:
+                        diarization = getattr(diarization_result, 'annotation', None)
+                        if diarization and hasattr(diarization, 'itertracks'):
+                            logger.debug("✅ Found annotation via getattr")
+                    except:
+                        pass
+            
+            # Si toujours None, logger pour debug
+            if diarization is None:
+                logger.warning(f"⚠️ Could not find Annotation in result type: {type(diarization_result)}")
+                logger.debug(f"🔍 Available attributes: {[a for a in dir(diarization_result) if not a.startswith('_')]}")
+                # Essayer d'utiliser directement le résultat si c'est itérable
+                if hasattr(diarization_result, '__iter__') and not isinstance(diarization_result, (str, bytes)):
+                    diarization = diarization_result
+            
             # Convertir au format attendu (même que StereoDiarizationService)
             diarization_segments = []
-            for segment, track, label in diarization.itertracks(yield_label=True):
-                diarization_segments.append({
-                    "start": round(segment.start, 2),
-                    "end": round(segment.end, 2),
-                    "speaker": label  # Format: "SPEAKER_00", "SPEAKER_01", etc.
-                })
+            
+            if diarization is None:
+                # Si diarization est None, essayer de traiter directement diarization_result
+                logger.debug("⚠️ diarization is None, trying to process diarization_result directly")
+                
+                # Essayer d'itérer directement si c'est itérable
+                try:
+                    if isinstance(diarization_result, (list, tuple)):
+                        # C'est une liste de segments
+                        for item in diarization_result:
+                            if isinstance(item, dict):
+                                diarization_segments.append({
+                                    "start": round(item.get('start', 0), 2),
+                                    "end": round(item.get('end', 0), 2),
+                                    "speaker": item.get('speaker', item.get('label', 'UNKNOWN'))
+                                })
+                            elif isinstance(item, (tuple, list)) and len(item) >= 3:
+                                segment, track, label = item[0], item[1], item[2]
+                                if hasattr(segment, 'start'):
+                                    diarization_segments.append({
+                                        "start": round(segment.start, 2),
+                                        "end": round(segment.end, 2),
+                                        "speaker": label
+                                    })
+                                else:
+                                    diarization_segments.append({
+                                        "start": round(float(segment), 2),
+                                        "end": round(float(track), 2),
+                                        "speaker": str(label)
+                                    })
+                    elif hasattr(diarization_result, '__iter__'):
+                        # C'est un itérable mais pas une liste
+                        for item in diarization_result:
+                            if isinstance(item, (tuple, list)) and len(item) >= 3:
+                                segment, track, label = item[0], item[1], item[2]
+                                if hasattr(segment, 'start'):
+                                    diarization_segments.append({
+                                        "start": round(segment.start, 2),
+                                        "end": round(segment.end, 2),
+                                        "speaker": label
+                                    })
+                except Exception as e:
+                    logger.error(f"❌ Error processing diarization_result directly: {e}")
+                    logger.error(f"❌ Result type: {type(diarization_result)}")
+                    return []
+            elif hasattr(diarization, 'itertracks'):
+                # Format Annotation standard (comme WhisperX)
+                for segment, track, label in diarization.itertracks(yield_label=True):
+                    diarization_segments.append({
+                        "start": round(segment.start, 2),
+                        "end": round(segment.end, 2),
+                        "speaker": label  # Format: "SPEAKER_00", "SPEAKER_01", etc.
+                    })
+            elif diarization_result is not None and hasattr(diarization_result, '__dict__'):
+                # Essayer d'accéder aux attributs de l'objet
+                logger.warning(f"⚠️ Trying to access attributes of {type(diarization_result)}")
+                attrs = vars(diarization_result)
+                logger.debug(f"🔍 Object attributes: {list(attrs.keys())}")
+                
+                # Chercher un attribut qui pourrait contenir l'annotation
+                for attr_name in ['annotation', 'diarization', 'segments', 'tracks', 'result']:
+                    if hasattr(diarization_result, attr_name):
+                        attr_value = getattr(diarization_result, attr_name)
+                        logger.debug(f"🔍 Found attribute '{attr_name}': {type(attr_value)}")
+                        if hasattr(attr_value, 'itertracks'):
+                            diarization = attr_value
+                            logger.info(f"✅ Found Annotation in attribute '{attr_name}'")
+                            break
+                        elif isinstance(attr_value, list) and len(attr_value) > 0:
+                            # C'est peut-être une liste de segments
+                            diarization = None
+                            diarization_result = attr_value
+                            logger.info(f"✅ Found list in attribute '{attr_name}', treating as segments")
+                            break
+                
+                if diarization is None and diarization_result is not None:
+                    # Essayer d'accéder comme un dictionnaire avec des clés communes
+                    if hasattr(diarization_result, 'get') or isinstance(diarization_result, dict):
+                        # C'est peut-être un dictionnaire-like
+                        segments_data = None
+                        if isinstance(diarization_result, dict):
+                            segments_data = diarization_result.get('segments', diarization_result.get('tracks', diarization_result.get('diarization', [])))
+                        elif hasattr(diarization_result, 'get'):
+                            segments_data = diarization_result.get('segments', diarization_result.get('tracks', []))
+                        
+                        if segments_data:
+                            for seg_data in segments_data:
+                                if isinstance(seg_data, dict):
+                                    diarization_segments.append({
+                                        "start": round(seg_data.get('start', 0), 2),
+                                        "end": round(seg_data.get('end', 0), 2),
+                                        "speaker": seg_data.get('speaker', seg_data.get('label', 'UNKNOWN'))
+                                    })
+                                elif isinstance(seg_data, (list, tuple)) and len(seg_data) >= 2:
+                                    diarization_segments.append({
+                                        "start": round(seg_data[0], 2),
+                                        "end": round(seg_data[1], 2),
+                                        "speaker": seg_data[2] if len(seg_data) > 2 else 'UNKNOWN'
+                                    })
+                    else:
+                        logger.error(f"❌ Cannot extract segments from diarization result type: {type(diarization_result)}")
+                        logger.error(f"❌ Available methods: {[m for m in dir(diarization_result) if not m.startswith('_')]}")
+                        return []
+            else:
+                logger.error(f"❌ Cannot extract segments from diarization result type: {type(diarization_result)}")
+                logger.error(f"❌ Result: {diarization_result}")
+                return []
             
             # Trier par timestamp de début
             diarization_segments.sort(key=lambda x: x['start'])
