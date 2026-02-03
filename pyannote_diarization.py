@@ -489,13 +489,24 @@ class PyannoteDiarizationService:
         # Logger les segments de diarisation pour debug
         unique_diarization_speakers = set(seg["speaker"] for seg in diarization_segments)
         logger.info(f"🔍 Diarization segments: {len(diarization_segments)} segments with speakers: {unique_diarization_speakers}")
-        logger.debug(f"🔍 First few diarization segments: {diarization_segments[:5]}")
+        logger.info(f"🔍 First few diarization segments: {diarization_segments[:5]}")
+        logger.info(f"🔍 Last few diarization segments: {diarization_segments[-5:]}")
+        
+        # Logger quelques exemples de segments par speaker
+        for speaker_id in sorted(unique_diarization_speakers):
+            speaker_segs = [s for s in diarization_segments if s["speaker"] == speaker_id]
+            logger.info(f"🔍 {speaker_id}: {len(speaker_segs)} segments, first: {speaker_segs[0] if speaker_segs else None}, last: {speaker_segs[-1] if speaker_segs else None}")
         
         # Créer une liste des segments avec speakers assignés
         segments_with_speakers = []
         speaker_assignment_count = {}
         
-        for trans_seg in transcription_segments:
+        # Logger quelques exemples de segments de transcription pour debug
+        logger.info(f"🔍 Transcription segments: {len(transcription_segments)} segments")
+        logger.info(f"🔍 First transcription segment: {transcription_segments[0] if transcription_segments else None}")
+        logger.info(f"🔍 Last transcription segment: {transcription_segments[-1] if transcription_segments else None}")
+        
+        for idx, trans_seg in enumerate(transcription_segments):
             trans_start = trans_seg["start"]
             trans_end = trans_seg["end"]
             trans_mid = (trans_start + trans_end) / 2.0
@@ -505,6 +516,7 @@ class PyannoteDiarizationService:
             speaker = None
             max_overlap = 0.0
             best_diar_seg = None
+            overlapping_segments = []
             
             for diar_seg in diarization_segments:
                 diar_start = diar_seg["start"]
@@ -517,6 +529,11 @@ class PyannoteDiarizationService:
                 
                 # Si il y a un overlap, garder le segment avec le plus grand overlap
                 if overlap > 0:
+                    overlapping_segments.append({
+                        'diar_seg': diar_seg,
+                        'overlap': overlap,
+                        'contains_midpoint': diar_start <= trans_mid <= diar_end
+                    })
                     if overlap > max_overlap:
                         max_overlap = overlap
                         speaker = diar_seg["speaker"]
@@ -526,6 +543,19 @@ class PyannoteDiarizationService:
                         # En cas d'égalité, préférer celui qui contient le point médian
                         speaker = diar_seg["speaker"]
                         best_diar_seg = diar_seg
+            
+            # Logger pour les premiers segments et ceux avec plusieurs speakers pour debug
+            if idx < 5 or (overlapping_segments and len(set(s['diar_seg']['speaker'] for s in overlapping_segments)) > 1):
+                logger.info(
+                    f"🔍 Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
+                    f"assigned to {speaker}, {len(overlapping_segments)} overlapping diar segments"
+                )
+                if overlapping_segments:
+                    for ovl in overlapping_segments[:5]:  # Logger les 5 premiers overlaps
+                        logger.info(
+                            f"   - {ovl['diar_seg']['speaker']} [{ovl['diar_seg']['start']:.2f}-{ovl['diar_seg']['end']:.2f}]: "
+                            f"overlap={ovl['overlap']:.2f}s, midpoint={ovl['contains_midpoint']}"
+                        )
             
             # Si aucun overlap trouvé, essayer de trouver le segment de diarisation le plus proche
             if speaker is None:
