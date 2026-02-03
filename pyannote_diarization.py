@@ -519,6 +519,20 @@ class PyannoteDiarizationService:
                         speaker_intersections[speaker] = 0.0
                     speaker_intersections[speaker] += intersection
             
+            # Logger pour debug sur quelques segments problématiques (où SPEAKER_01 devrait apparaître)
+            if len(speaker_intersections) > 1 and idx in [14, 15, 16, 25, 26, 27]:
+                logger.info(
+                    f"🔍 Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
+                    f"intersections by speaker: {speaker_intersections}"
+                )
+            
+            # Logger pour debug sur quelques segments problématiques (où SPEAKER_01 devrait apparaître)
+            if len(speaker_intersections) > 1 and idx in [14, 15, 16, 25, 26, 27]:
+                logger.info(
+                    f"🔍 Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
+                    f"intersections by speaker: {speaker_intersections}"
+                )
+            
             # Choisir le speaker avec la plus grande somme d'intersections (comme WhisperX)
             if speaker_intersections:
                 speaker = max(speaker_intersections.items(), key=lambda x: x[1])[0]
