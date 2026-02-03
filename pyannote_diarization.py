@@ -161,6 +161,32 @@ class PyannoteDiarizationService:
             'pyannote/speaker-diarization-3.1'
         )
         
+        # Configurer le cache des modèles pyannote pour utiliser le même répertoire que Whisper
+        # Les modèles Whisper sont dans /app/models/transcribe/
+        # On met les modèles pyannote dans /app/models/pyannote/
+        pyannote_cache_dir = Path("/app/models/pyannote")
+        pyannote_cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Configurer les variables d'environnement HuggingFace pour utiliser notre cache
+        # pyannote utilise HuggingFace pour télécharger les modèles
+        os.environ['HF_HOME'] = str(pyannote_cache_dir)
+        os.environ['TRANSFORMERS_CACHE'] = str(pyannote_cache_dir / 'transformers')
+        os.environ['HF_DATASETS_CACHE'] = str(pyannote_cache_dir / 'datasets')
+        
+        # Vérifier si le modèle existe déjà localement
+        # Les modèles HuggingFace sont généralement dans ~/.cache/huggingface/hub/models--pyannote--speaker-diarization-3.1
+        # On vérifie dans notre cache personnalisé
+        model_cache_path = pyannote_cache_dir / 'hub' / f'models--{model_name.replace("/", "--")}'
+        model_exists_locally = model_cache_path.exists() and any(model_cache_path.iterdir())
+        
+        if model_exists_locally:
+            logger.info(f"✅ Pyannote model found locally at {model_cache_path}")
+        else:
+            logger.info(f"📥 Pyannote model will be downloaded to {pyannote_cache_dir}")
+        
+        self.pyannote_cache_dir = pyannote_cache_dir
+        self.model_exists_locally = model_exists_locally
+        
         # Récupérer le token : config > variable d'environnement > None
         # Les versions récentes de pyannote.audio utilisent 'token' au lieu de 'use_auth_token'
         # et supportent aussi les variables d'environnement HF_TOKEN ou HUGGING_FACE_HUB_TOKEN
@@ -194,34 +220,62 @@ class PyannoteDiarizationService:
         
         logger.info(f"🎯 Loading pyannote diarization model: {model_name}")
         logger.info(f"📊 Device: {device}")
+        logger.info(f"📁 Cache directory: {self.pyannote_cache_dir}")
         
         try:
-            # Essayer d'abord avec 'token' (versions récentes), puis 'use_auth_token' (anciennes versions)
-            # Si aucun token n'est fourni, pyannote essaiera automatiquement les variables d'environnement
+            # Préparer les arguments pour Pipeline.from_pretrained
+            pipeline_kwargs = {}
+            
+            # Ajouter le token si disponible
             if auth_token:
                 logger.info("🔑 Using HuggingFace token for authentication")
-                # Essayer d'abord 'token' (versions récentes de pyannote.audio)
-                try:
-                    self.model = Pipeline.from_pretrained(
-                        model_name,
-                        token=auth_token
-                    ).to(device)
-                except TypeError as e:
-                    # Si 'token' n'est pas supporté, essayer 'use_auth_token' (anciennes versions)
-                    if "unexpected keyword argument 'token'" in str(e):
-                        logger.info("🔄 Trying with 'use_auth_token' parameter (older pyannote.audio version)")
-                        self.model = Pipeline.from_pretrained(
-                            model_name,
-                            use_auth_token=auth_token
-                        ).to(device)
-                    else:
-                        raise
+                pipeline_kwargs['token'] = auth_token
             else:
                 logger.info("ℹ️ No token provided, pyannote will use environment variables if available")
-                # Essayer sans token (pyannote utilisera les variables d'environnement)
+            
+            # Essayer d'utiliser local_files_only si le modèle existe déjà
+            # Note: local_files_only n'est peut-être pas supporté par toutes les versions de pyannote
+            if self.model_exists_locally:
+                # Essayer avec local_files_only pour éviter les téléchargements
+                pipeline_kwargs['local_files_only'] = True
+                logger.info("🔍 Trying to load model with local_files_only=True")
+            
+            # Essayer d'abord avec 'token' (versions récentes)
+            try:
                 self.model = Pipeline.from_pretrained(
-                    model_name
+                    model_name,
+                    **pipeline_kwargs
                 ).to(device)
+            except (OSError, FileNotFoundError) as e:
+                # Si local_files_only=True et modèle non trouvé, réessayer sans
+                if self.model_exists_locally and pipeline_kwargs.get('local_files_only'):
+                    logger.warning(f"⚠️ Model not found locally despite cache check, retrying without local_files_only: {e}")
+                    pipeline_kwargs.pop('local_files_only', None)
+                    self.model = Pipeline.from_pretrained(
+                        model_name,
+                        **pipeline_kwargs
+                    ).to(device)
+                else:
+                    raise
+            except TypeError as e:
+                # Si 'token' n'est pas supporté, essayer 'use_auth_token' (anciennes versions)
+                if "unexpected keyword argument 'token'" in str(e):
+                    logger.info("🔄 Trying with 'use_auth_token' parameter (older pyannote.audio version)")
+                    if auth_token:
+                        pipeline_kwargs['use_auth_token'] = pipeline_kwargs.pop('token', None)
+                    self.model = Pipeline.from_pretrained(
+                        model_name,
+                        **pipeline_kwargs
+                    ).to(device)
+                elif "unexpected keyword argument 'local_files_only'" in str(e):
+                    # Si local_files_only n'est pas supporté, réessayer sans
+                    pipeline_kwargs.pop('local_files_only', None)
+                    self.model = Pipeline.from_pretrained(
+                        model_name,
+                        **pipeline_kwargs
+                    ).to(device)
+                else:
+                    raise
             logger.info("✅ Pyannote diarization service initialized and ready")
         except Exception as e:
             logger.error(f"❌ Failed to load pyannote model: {e}", exc_info=True)
