@@ -96,7 +96,7 @@ class Config:
             'stereo_min_speech_ms': '250',  # Durée minimale de parole pour être considérée (en ms)
             # Paramètres pour diarisation pyannote (pour audio mono, comme WhisperX)
             'pyannote_model': 'pyannote/speaker-diarization-3.1',  # Modèle pyannote à utiliser
-            'pyannote_auth_token': '',  # Token HuggingFace (optionnel, requis pour certains modèles)
+            'pyannote_auth_token': '',  # Token HuggingFace (optionnel, peut aussi utiliser HF_TOKEN ou HUGGING_FACE_HUB_TOKEN en variable d'environnement)
             'pyannote_num_speakers': '',  # Nombre exact de locuteurs (optionnel, None = auto)
             'pyannote_min_speakers': '',  # Nombre minimum de locuteurs (optionnel)
             'pyannote_max_speakers': ''  # Nombre maximum de locuteurs (optionnel)

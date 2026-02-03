@@ -16,6 +16,7 @@ INCONVÉNIENTS:
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import List, Dict, Optional
 import numpy as np
@@ -110,7 +111,32 @@ class PyannoteDiarizationService:
             'pyannote_model', 
             'pyannote/speaker-diarization-3.1'
         )
-        use_auth_token = getattr(config, 'pyannote_auth_token', None)
+        
+        # Récupérer le token : config > variable d'environnement > None
+        # Les versions récentes de pyannote.audio utilisent 'token' au lieu de 'use_auth_token'
+        # et supportent aussi les variables d'environnement HF_TOKEN ou HUGGING_FACE_HUB_TOKEN
+        auth_token = getattr(config, 'pyannote_auth_token', None)
+        
+        # Nettoyer le token s'il existe (enlever les espaces, etc.)
+        if auth_token:
+            auth_token = str(auth_token).strip()
+            if not auth_token:
+                auth_token = None
+        
+        if not auth_token:
+            # Essayer les variables d'environnement standard de HuggingFace
+            auth_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')
+            if auth_token:
+                auth_token = str(auth_token).strip()
+                if not auth_token:
+                    auth_token = None
+        
+        # Log pour debug (masquer le token pour la sécurité)
+        if auth_token:
+            token_preview = auth_token[:8] + "..." if len(auth_token) > 8 else "***"
+            logger.info(f"🔑 Token found: {token_preview} (length: {len(auth_token)})")
+        else:
+            logger.info("ℹ️ No token found in config or environment variables")
         
         # Paramètres optionnels pour la diarisation
         self.num_speakers = getattr(config, 'pyannote_num_speakers', None)
@@ -121,10 +147,32 @@ class PyannoteDiarizationService:
         logger.info(f"📊 Device: {device}")
         
         try:
-            self.model = Pipeline.from_pretrained(
-                model_name, 
-                use_auth_token=use_auth_token
-            ).to(device)
+            # Essayer d'abord avec 'token' (versions récentes), puis 'use_auth_token' (anciennes versions)
+            # Si aucun token n'est fourni, pyannote essaiera automatiquement les variables d'environnement
+            if auth_token:
+                logger.info("🔑 Using HuggingFace token for authentication")
+                # Essayer d'abord 'token' (versions récentes de pyannote.audio)
+                try:
+                    self.model = Pipeline.from_pretrained(
+                        model_name,
+                        token=auth_token
+                    ).to(device)
+                except TypeError as e:
+                    # Si 'token' n'est pas supporté, essayer 'use_auth_token' (anciennes versions)
+                    if "unexpected keyword argument 'token'" in str(e):
+                        logger.info("🔄 Trying with 'use_auth_token' parameter (older pyannote.audio version)")
+                        self.model = Pipeline.from_pretrained(
+                            model_name,
+                            use_auth_token=auth_token
+                        ).to(device)
+                    else:
+                        raise
+            else:
+                logger.info("ℹ️ No token provided, pyannote will use environment variables if available")
+                # Essayer sans token (pyannote utilisera les variables d'environnement)
+                self.model = Pipeline.from_pretrained(
+                    model_name
+                ).to(device)
             logger.info("✅ Pyannote diarization service initialized and ready")
         except Exception as e:
             logger.error(f"❌ Failed to load pyannote model: {e}", exc_info=True)
