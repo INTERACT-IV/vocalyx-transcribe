@@ -244,24 +244,35 @@ class PyannoteDiarizationService:
                 all_attrs = [a for a in dir(diarization_result) if not a.startswith('_')]
                 logger.info(f"🔍 Available attributes: {all_attrs}")
                 
-                # Essayer d'accéder à tous les attributs possibles qui pourraient contenir l'annotation
-                for attr_name in all_attrs:
-                    try:
-                        attr_value = getattr(diarization_result, attr_name)
-                        if attr_value is not None and hasattr(attr_value, 'itertracks'):
-                            diarization = attr_value
-                            logger.info(f"✅ Found Annotation in attribute '{attr_name}'")
-                            break
-                        elif attr_name.lower() in ['annotation', 'diarization', 'result', 'output']:
-                            # Ces attributs sont suspects, logger leur type
-                            logger.info(f"🔍 Attribute '{attr_name}' type: {type(attr_value)}, value: {attr_value}")
-                            if hasattr(attr_value, 'itertracks'):
+                # Essayer d'accéder aux attributs qui contiennent l'annotation
+                # Priorité: speaker_diarization (standard avec chevauchements) > exclusive_speaker_diarization (sans chevauchements)
+                priority_attrs = ['speaker_diarization', 'exclusive_speaker_diarization', 'annotation', 'diarization']
+                
+                for attr_name in priority_attrs:
+                    if attr_name in all_attrs:
+                        try:
+                            attr_value = getattr(diarization_result, attr_name)
+                            if attr_value is not None and hasattr(attr_value, 'itertracks'):
                                 diarization = attr_value
                                 logger.info(f"✅ Found Annotation in attribute '{attr_name}'")
                                 break
-                    except Exception as e:
-                        logger.debug(f"⚠️ Could not access attribute '{attr_name}': {e}")
-                        continue
+                        except Exception as e:
+                            logger.debug(f"⚠️ Could not access attribute '{attr_name}': {e}")
+                            continue
+                
+                # Si pas trouvé dans les attributs prioritaires, essayer tous les autres
+                if diarization is None:
+                    for attr_name in all_attrs:
+                        if attr_name not in priority_attrs:
+                            try:
+                                attr_value = getattr(diarization_result, attr_name)
+                                if attr_value is not None and hasattr(attr_value, 'itertracks'):
+                                    diarization = attr_value
+                                    logger.info(f"✅ Found Annotation in attribute '{attr_name}'")
+                                    break
+                            except Exception as e:
+                                logger.debug(f"⚠️ Could not access attribute '{attr_name}': {e}")
+                                continue
                 
                 # Essayer aussi l'accès par index si c'est un tuple ou NamedTuple
                 if diarization is None:
