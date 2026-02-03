@@ -512,11 +512,14 @@ class PyannoteDiarizationService:
             trans_mid = (trans_start + trans_end) / 2.0
             
             # Trouver le locuteur qui parle dans ce segment de transcription
-            # Stratégie améliorée : utiliser le segment de diarisation avec le plus grand overlap
+            # Stratégie améliorée : prioriser les segments qui contiennent le point médian
             speaker = None
             max_overlap = 0.0
+            max_overlap_percentage = 0.0
             best_diar_seg = None
+            best_contains_midpoint = False
             overlapping_segments = []
+            trans_duration = trans_end - trans_start
             
             for diar_seg in diarization_segments:
                 diar_start = diar_seg["start"]
@@ -529,20 +532,45 @@ class PyannoteDiarizationService:
                 
                 # Si il y a un overlap, garder le segment avec le plus grand overlap
                 if overlap > 0:
+                    # Calculer le pourcentage d'overlap par rapport à la durée du segment de transcription
+                    overlap_percentage = overlap / trans_duration if trans_duration > 0 else 0
+                    contains_midpoint = diar_start <= trans_mid <= diar_end
+                    
                     overlapping_segments.append({
                         'diar_seg': diar_seg,
                         'overlap': overlap,
-                        'contains_midpoint': diar_start <= trans_mid <= diar_end
+                        'overlap_percentage': overlap_percentage,
+                        'contains_midpoint': contains_midpoint
                     })
-                    if overlap > max_overlap:
+                    
+                    # Stratégie améliorée : prioriser les segments qui contiennent le point médian
+                    # Mais aussi considérer les segments avec très bon overlap (>50%) même sans point médian
+                    is_better = False
+                    
+                    if contains_midpoint and overlap_percentage > 0.15:
+                        # Ce segment contient le point médian avec overlap significatif
+                        if not best_contains_midpoint:
+                            # Aucun meilleur segment ne contient le point médian, celui-ci est meilleur
+                            is_better = True
+                        elif overlap_percentage > max_overlap_percentage:
+                            # Les deux contiennent le point médian, prendre celui avec le meilleur pourcentage
+                            is_better = True
+                    elif overlap_percentage > 0.5 and not best_contains_midpoint:
+                        # Segment avec très bon overlap (>50%) même sans point médian
+                        # Mais seulement si aucun segment ne contient le point médian
+                        if overlap_percentage > max_overlap_percentage:
+                            is_better = True
+                    elif not best_contains_midpoint:
+                        # Aucun segment ne contient le point médian et pas de très bon overlap, utiliser le plus grand overlap
+                        if overlap_percentage > max_overlap_percentage:
+                            is_better = True
+                    
+                    if is_better:
                         max_overlap = overlap
+                        max_overlap_percentage = overlap_percentage
                         speaker = diar_seg["speaker"]
                         best_diar_seg = diar_seg
-                    # Si le point médian est dans ce segment, c'est un bon candidat
-                    elif diar_start <= trans_mid <= diar_end and overlap == max_overlap:
-                        # En cas d'égalité, préférer celui qui contient le point médian
-                        speaker = diar_seg["speaker"]
-                        best_diar_seg = diar_seg
+                        best_contains_midpoint = contains_midpoint
             
             # Logger pour les premiers segments et ceux avec plusieurs speakers pour debug
             if idx < 5 or (overlapping_segments and len(set(s['diar_seg']['speaker'] for s in overlapping_segments)) > 1):
@@ -554,7 +582,7 @@ class PyannoteDiarizationService:
                     for ovl in overlapping_segments[:5]:  # Logger les 5 premiers overlaps
                         logger.info(
                             f"   - {ovl['diar_seg']['speaker']} [{ovl['diar_seg']['start']:.2f}-{ovl['diar_seg']['end']:.2f}]: "
-                            f"overlap={ovl['overlap']:.2f}s, midpoint={ovl['contains_midpoint']}"
+                            f"overlap={ovl['overlap']:.2f}s ({ovl['overlap_percentage']*100:.1f}%), midpoint={ovl['contains_midpoint']}"
                         )
             
             # Si aucun overlap trouvé, essayer de trouver le segment de diarisation le plus proche
