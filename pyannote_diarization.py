@@ -489,122 +489,41 @@ class PyannoteDiarizationService:
         # Logger les segments de diarisation pour debug
         unique_diarization_speakers = set(seg["speaker"] for seg in diarization_segments)
         logger.info(f"🔍 Diarization segments: {len(diarization_segments)} segments with speakers: {unique_diarization_speakers}")
-        logger.info(f"🔍 First few diarization segments: {diarization_segments[:5]}")
-        logger.info(f"🔍 Last few diarization segments: {diarization_segments[-5:]}")
-        
-        # Logger quelques exemples de segments par speaker
-        for speaker_id in sorted(unique_diarization_speakers):
-            speaker_segs = [s for s in diarization_segments if s["speaker"] == speaker_id]
-            logger.info(f"🔍 {speaker_id}: {len(speaker_segs)} segments, first: {speaker_segs[0] if speaker_segs else None}, last: {speaker_segs[-1] if speaker_segs else None}")
         
         # Créer une liste des segments avec speakers assignés
         segments_with_speakers = []
         speaker_assignment_count = {}
         
-        # Logger quelques exemples de segments de transcription pour debug
-        logger.info(f"🔍 Transcription segments: {len(transcription_segments)} segments")
-        logger.info(f"🔍 First transcription segment: {transcription_segments[0] if transcription_segments else None}")
-        logger.info(f"🔍 Last transcription segment: {transcription_segments[-1] if transcription_segments else None}")
-        
+        # Utiliser la même logique que WhisperX : sommer les intersections par speaker
+        # C'est plus simple et plus efficace que de chercher le meilleur segment individuel
         for idx, trans_seg in enumerate(transcription_segments):
             trans_start = trans_seg["start"]
             trans_end = trans_seg["end"]
-            trans_mid = (trans_start + trans_end) / 2.0
             
-            # Trouver le locuteur qui parle dans ce segment de transcription
-            # Stratégie améliorée : prioriser les segments qui contiennent le point médian
-            speaker = None
-            max_overlap = 0.0
-            max_overlap_percentage = 0.0
-            best_diar_seg = None
-            best_contains_midpoint = False
-            overlapping_segments = []
-            trans_duration = trans_end - trans_start
+            # Calculer l'intersection avec chaque segment de diarisation et grouper par speaker
+            speaker_intersections = {}
             
             for diar_seg in diarization_segments:
                 diar_start = diar_seg["start"]
                 diar_end = diar_seg["end"]
+                speaker = diar_seg["speaker"]
                 
-                # Calculer l'overlap entre le segment de transcription et le segment de diarisation
-                overlap_start = max(trans_start, diar_start)
-                overlap_end = min(trans_end, diar_end)
-                overlap = max(0.0, overlap_end - overlap_start)
+                # Calculer l'intersection (overlap) entre le segment de transcription et le segment de diarisation
+                intersection_start = max(trans_start, diar_start)
+                intersection_end = min(trans_end, diar_end)
+                intersection = max(0.0, intersection_end - intersection_start)
                 
-                # Si il y a un overlap, garder le segment avec le plus grand overlap
-                if overlap > 0:
-                    # Calculer le pourcentage d'overlap par rapport à la durée du segment de transcription
-                    overlap_percentage = overlap / trans_duration if trans_duration > 0 else 0
-                    contains_midpoint = diar_start <= trans_mid <= diar_end
-                    
-                    overlapping_segments.append({
-                        'diar_seg': diar_seg,
-                        'overlap': overlap,
-                        'overlap_percentage': overlap_percentage,
-                        'contains_midpoint': contains_midpoint
-                    })
-                    
-                    # Stratégie améliorée : prioriser les segments qui contiennent le point médian
-                    # Mais aussi considérer les segments avec très bon overlap (>50%) même sans point médian
-                    is_better = False
-                    
-                    if contains_midpoint and overlap_percentage > 0.15:
-                        # Ce segment contient le point médian avec overlap significatif
-                        if not best_contains_midpoint:
-                            # Aucun meilleur segment ne contient le point médian, celui-ci est meilleur
-                            is_better = True
-                        elif overlap_percentage > max_overlap_percentage:
-                            # Les deux contiennent le point médian, prendre celui avec le meilleur pourcentage
-                            is_better = True
-                    elif overlap_percentage > 0.5 and not best_contains_midpoint:
-                        # Segment avec très bon overlap (>50%) même sans point médian
-                        # Mais seulement si aucun segment ne contient le point médian
-                        if overlap_percentage > max_overlap_percentage:
-                            is_better = True
-                    elif not best_contains_midpoint:
-                        # Aucun segment ne contient le point médian et pas de très bon overlap, utiliser le plus grand overlap
-                        if overlap_percentage > max_overlap_percentage:
-                            is_better = True
-                    
-                    if is_better:
-                        max_overlap = overlap
-                        max_overlap_percentage = overlap_percentage
-                        speaker = diar_seg["speaker"]
-                        best_diar_seg = diar_seg
-                        best_contains_midpoint = contains_midpoint
+                # Sommer les intersections par speaker (comme WhisperX)
+                if intersection > 0:
+                    if speaker not in speaker_intersections:
+                        speaker_intersections[speaker] = 0.0
+                    speaker_intersections[speaker] += intersection
             
-            # Logger pour les premiers segments et ceux avec plusieurs speakers pour debug
-            if idx < 5 or (overlapping_segments and len(set(s['diar_seg']['speaker'] for s in overlapping_segments)) > 1):
-                logger.info(
-                    f"🔍 Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
-                    f"assigned to {speaker}, {len(overlapping_segments)} overlapping diar segments"
-                )
-                if overlapping_segments:
-                    for ovl in overlapping_segments[:5]:  # Logger les 5 premiers overlaps
-                        logger.info(
-                            f"   - {ovl['diar_seg']['speaker']} [{ovl['diar_seg']['start']:.2f}-{ovl['diar_seg']['end']:.2f}]: "
-                            f"overlap={ovl['overlap']:.2f}s ({ovl['overlap_percentage']*100:.1f}%), midpoint={ovl['contains_midpoint']}"
-                        )
-            
-            # Si aucun overlap trouvé, essayer de trouver le segment de diarisation le plus proche
-            if speaker is None:
-                min_distance = float('inf')
-                for diar_seg in diarization_segments:
-                    diar_start = diar_seg["start"]
-                    diar_end = diar_seg["end"]
-                    # Calculer la distance entre le segment de transcription et le segment de diarisation
-                    if trans_end < diar_start:
-                        distance = diar_start - trans_end
-                    elif trans_start > diar_end:
-                        distance = trans_start - diar_end
-                    else:
-                        distance = 0  # Il y a un chevauchement (devrait avoir été capturé avant)
-                    
-                    if distance < min_distance:
-                        min_distance = distance
-                        speaker = diar_seg["speaker"]
-            
-            # Si aucun locuteur trouvé, utiliser "UNKNOWN"
-            if speaker is None:
+            # Choisir le speaker avec la plus grande somme d'intersections (comme WhisperX)
+            if speaker_intersections:
+                speaker = max(speaker_intersections.items(), key=lambda x: x[1])[0]
+            else:
+                # Si aucun overlap, utiliser "UNKNOWN"
                 speaker = "UNKNOWN"
             
             # Créer le segment avec le speaker
