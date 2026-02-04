@@ -774,11 +774,87 @@ class PyannoteDiarizationService:
                     f"No overlapping diarization segments found!"
                 )
             
+            # AMÉLIORATION : Pour les premiers segments de transcription, forcer l'alternance si 2 speakers sont détectés
+            # mais qu'un speaker apparaît tardivement (après 5 secondes)
+            # Cela corrige les cas où pyannote détecte un speaker tardivement alors qu'il parle dès le début
+            if idx < 2 and len(first_segment_by_speaker) == 2:
+                speaker_ids = sorted(first_segment_by_speaker.keys())
+                speaker_0_id, speaker_1_id = speaker_ids[0], speaker_ids[1]
+                speaker_0_first = first_segment_by_speaker[speaker_0_id]['start']
+                speaker_1_first = first_segment_by_speaker[speaker_1_id]['start']
+                
+                # Si un speaker apparaît tardivement (après 5 secondes) mais qu'on a forcé 2 speakers,
+                # appliquer une alternance forcée pour les 2 premiers segments
+                late_speaker = None
+                early_speaker = None
+                if speaker_0_first > 5.0:
+                    late_speaker = speaker_0_id
+                    early_speaker = speaker_1_id
+                elif speaker_1_first > 5.0:
+                    late_speaker = speaker_1_id
+                    early_speaker = speaker_0_id
+                
+                # Si un speaker apparaît tardivement, forcer l'alternance pour les premiers segments
+                if late_speaker and early_speaker:
+                    # Pour le premier segment (idx=0), forcer l'alternance en ajoutant une intersection
+                    # pour le speaker tardif si on a forcé 2 speakers
+                    if idx == 0:
+                        # Si le segment actuel n'a qu'une intersection avec le speaker qui apparaît tôt,
+                        # mais qu'on a forcé 2 speakers, ajouter une intersection pour le speaker tardif
+                        # pour permettre l'alternance
+                        if (late_speaker not in speaker_intersections and 
+                            early_speaker in speaker_intersections and
+                            self.num_speakers == 2):  # On a forcé 2 speakers
+                            
+                            # Ajouter une intersection potentielle pour le speaker tardif
+                            # basée sur le fait qu'on sait qu'il y a 2 speakers et qu'ils doivent alterner
+                            segment_duration = trans_end - trans_start
+                            # Pour le premier segment, donner 60% de la durée au speaker tardif
+                            # pour permettre l'alternance (le speaker qui apparaît tôt garde 40%)
+                            potential_intersection = segment_duration * 0.6
+                            speaker_intersections[late_speaker] = potential_intersection
+                            
+                            # Réduire légèrement l'intersection du speaker qui apparaît tôt pour équilibrer
+                            if early_speaker in speaker_intersections:
+                                speaker_intersections[early_speaker] *= 0.7  # Réduire à 70%
+                            
+                            logger.info(
+                                f"🔍 Trans seg {idx}: FORCED ALTERNATION - added intersection for {late_speaker} "
+                                f"(late speaker detected at {first_segment_by_speaker[late_speaker]['start']:.2f}s, "
+                                f"potential: {potential_intersection:.2f}s) to enable speaker alternation "
+                                f"(num_speakers={self.num_speakers} forced)"
+                            )
+                    elif idx == 1:
+                        # Pour le deuxième segment, vérifier si le premier segment a été assigné au speaker tardif
+                        # Si oui, alterner avec le speaker qui apparaît tôt
+                        if len(segments_with_speakers) > 0:
+                            prev_speaker = segments_with_speakers[-1].get('speaker')
+                            if prev_speaker == late_speaker:
+                                # Le segment précédent était le speaker tardif, forcer l'alternance avec le speaker qui apparaît tôt
+                                segment_duration = trans_end - trans_start
+                                if early_speaker not in speaker_intersections:
+                                    speaker_intersections[early_speaker] = 0.0
+                                speaker_intersections[early_speaker] += segment_duration * 0.8
+                                logger.info(
+                                    f"🔍 Trans seg {idx}: FORCED ALTERNATION - previous was {late_speaker}, "
+                                    f"adding intersection for {early_speaker} (potential: {segment_duration * 0.8:.2f}s) to alternate"
+                                )
+                            elif prev_speaker == early_speaker:
+                                # Le segment précédent était le speaker qui apparaît tôt, continuer avec le speaker tardif
+                                segment_duration = trans_end - trans_start
+                                if late_speaker not in speaker_intersections:
+                                    speaker_intersections[late_speaker] = 0.0
+                                speaker_intersections[late_speaker] += segment_duration * 0.8
+                                logger.info(
+                                    f"🔍 Trans seg {idx}: FORCED ALTERNATION - previous was {early_speaker}, "
+                                    f"adding intersection for {late_speaker} (potential: {segment_duration * 0.8:.2f}s) to alternate"
+                                )
+            
             # AMÉLIORATION : Pour les premiers segments de transcription, détecter les changements de speaker
             # basés sur les patterns de conversation (alternance de speakers)
             # Si on a 2 speakers détectés et que le premier segment est assigné au même speaker que le deuxième,
             # mais qu'un autre speaker apparaît peu après, alterner les speakers pour les premiers segments
-            if idx < 3 and len(first_segment_by_speaker) == 2:
+            elif idx < 3 and len(first_segment_by_speaker) == 2:
                 # Si c'est le premier segment (idx=0) et qu'on a déjà assigné un speaker au segment précédent
                 # (dans une boucle précédente), vérifier l'alternance
                 if idx == 0:
@@ -884,18 +960,63 @@ class PyannoteDiarizationService:
                                 # Pas d'alternance possible, utiliser la logique normale
                                 speaker = best_speaker
                         else:
-                            # Premier segment : si les intersections sont similaires, choisir celui qui apparaît le plus tôt
-                            best_first = first_segment_by_speaker.get(best_speaker, {}).get('start', float('inf'))
-                            second_first = first_segment_by_speaker.get(second_speaker, {}).get('start', float('inf'))
-                            
-                            # Si le deuxième speaker apparaît plus tôt et que les intersections sont similaires,
-                            # le choisir pour le premier segment (corrige les cas où pyannote inverse les speakers)
-                            if second_first < best_first and intersection_ratio > 0.5:
-                                logger.info(
-                                    f"🔍 Trans seg {idx}: First segment - choosing {second_speaker} (appears earlier at {second_first:.2f}s) "
-                                    f"over {best_speaker} (appears at {best_first:.2f}s) due to similar intersections (ratio: {intersection_ratio:.2f})"
-                                )
-                                speaker = second_speaker
+                            # Premier segment : logique spéciale pour forcer l'alternance
+                            # Si un speaker apparaît tardivement (après 5s) mais qu'on a forcé 2 speakers,
+                            # forcer l'alternance en choisissant le speaker tardif pour le premier segment
+                            speaker_ids = sorted(first_segment_by_speaker.keys())
+                            if len(speaker_ids) == 2:
+                                speaker_0_id, speaker_1_id = speaker_ids[0], speaker_ids[1]
+                                speaker_0_first = first_segment_by_speaker[speaker_0_id]['start']
+                                speaker_1_first = first_segment_by_speaker[speaker_1_id]['start']
+                                
+                                # Si un speaker apparaît tardivement (après 5s) et qu'on a forcé 2 speakers,
+                                # forcer l'alternance en choisissant le speaker tardif pour le premier segment
+                                if (speaker_0_first > 5.0 or speaker_1_first > 5.0) and self.num_speakers == 2:
+                                    # Identifier le speaker tardif et le speaker qui apparaît tôt
+                                    if speaker_0_first > 5.0:
+                                        late_speaker = speaker_0_id
+                                        early_speaker = speaker_1_id
+                                    else:
+                                        late_speaker = speaker_1_id
+                                        early_speaker = speaker_0_id
+                                    
+                                    # Si les intersections sont similaires (ratio > 0.3) OU si le speaker tardif
+                                    # a une intersection ajoutée par la logique forcée, choisir le speaker tardif
+                                    # pour forcer l'alternance dès le premier segment
+                                    if (intersection_ratio > 0.3 or late_speaker in speaker_intersections):
+                                        logger.info(
+                                            f"🔍 Trans seg {idx}: FIRST SEGMENT - FORCING ALTERNATION - choosing {late_speaker} "
+                                            f"(late speaker detected at {first_segment_by_speaker[late_speaker]['start']:.2f}s) "
+                                            f"over {early_speaker} (appears at {first_segment_by_speaker[early_speaker]['start']:.2f}s) "
+                                            f"to enable speaker alternation (num_speakers={self.num_speakers} forced, ratio: {intersection_ratio:.2f})"
+                                        )
+                                        speaker = late_speaker
+                                    else:
+                                        # Si le ratio est trop faible, utiliser la logique normale mais avec un biais
+                                        # vers le speaker tardif si on a forcé l'alternance
+                                        if late_speaker in speaker_intersections:
+                                            speaker = late_speaker
+                                            logger.info(
+                                                f"🔍 Trans seg {idx}: FIRST SEGMENT - choosing {late_speaker} "
+                                                f"(forced alternation intersection present) over {best_speaker}"
+                                            )
+                                        else:
+                                            speaker = best_speaker
+                                else:
+                                    # Les deux speakers apparaissent tôt, utiliser la logique normale
+                                    best_first = first_segment_by_speaker.get(best_speaker, {}).get('start', float('inf'))
+                                    second_first = first_segment_by_speaker.get(second_speaker, {}).get('start', float('inf'))
+                                    
+                                    # Si le deuxième speaker apparaît plus tôt et que les intersections sont similaires,
+                                    # le choisir pour le premier segment (corrige les cas où pyannote inverse les speakers)
+                                    if second_first < best_first and intersection_ratio > 0.5:
+                                        logger.info(
+                                            f"🔍 Trans seg {idx}: First segment - choosing {second_speaker} (appears earlier at {second_first:.2f}s) "
+                                            f"over {best_speaker} (appears at {best_first:.2f}s) due to similar intersections (ratio: {intersection_ratio:.2f})"
+                                        )
+                                        speaker = second_speaker
+                                    else:
+                                        speaker = best_speaker
                             else:
                                 speaker = best_speaker
                     elif intersection_ratio > 0.7:  # Si le deuxième speaker a au moins 70% de l'intersection du premier
