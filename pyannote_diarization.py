@@ -18,7 +18,7 @@ INCONVÉNIENTS:
 import logging
 import os
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union, Tuple
 import numpy as np
 import torch
 
@@ -315,17 +315,21 @@ class PyannoteDiarizationService:
             logger.error(f"❌ Failed to load pyannote model: {e}", exc_info=True)
             raise
     
-    def diarize(self, audio_path: Path) -> List[Dict[str, float]]:
+    def diarize(self, audio_path: Path, return_embeddings: bool = False) -> Union[Tuple[List[Dict[str, float]], Optional[Dict[str, List[float]]]], List[Dict[str, float]]]:
         """
         Effectue la diarisation pyannote sur un fichier audio.
         Même format de retour que StereoDiarizationService pour compatibilité.
         
         Args:
             audio_path: Chemin vers le fichier audio (mono ou stéréo)
+            return_embeddings: Si True, retourne aussi les embeddings des speakers
             
         Returns:
-            Liste de dictionnaires avec les segments de chaque locuteur:
-            [{"start": 0.0, "end": 5.2, "speaker": "SPEAKER_00"}, ...]
+            Si return_embeddings=True:
+                Tuple de (liste de segments, dictionnaire d'embeddings)
+            Sinon:
+                Liste de dictionnaires avec les segments de chaque locuteur:
+                [{"start": 0.0, "end": 5.2, "speaker": "SPEAKER_00"}, ...]
         """
         try:
             logger.info(f"🎤 Running pyannote diarization on {audio_path.name}...")
@@ -354,10 +358,29 @@ class PyannoteDiarizationService:
                 diarization_params['max_speakers'] = self.max_speakers
                 logger.info(f"🎯 Using max_speakers={self.max_speakers}")
             
-            diarization_result = self.model(
-                audio_data,
-                **diarization_params
-            )
+            # Exécuter la diarisation avec ou sans embeddings (comme WhisperX)
+            if return_embeddings:
+                try:
+                    diarization_result, embeddings = self.model(
+                        audio_data,
+                        return_embeddings=True,
+                        **diarization_params
+                    )
+                    logger.info("✅ Diarization with embeddings requested")
+                except TypeError:
+                    # Si return_embeddings n'est pas supporté, continuer sans
+                    logger.warning("⚠️ return_embeddings not supported by this pyannote version, continuing without embeddings")
+                    diarization_result = self.model(
+                        audio_data,
+                        **diarization_params
+                    )
+                    embeddings = None
+            else:
+                diarization_result = self.model(
+                    audio_data,
+                    **diarization_params
+                )
+                embeddings = None
             
             # Gérer différents formats de retour selon la version de pyannote.audio
             # Les versions récentes peuvent retourner DiarizeOutput au lieu d'Annotation directement
@@ -621,503 +644,250 @@ class PyannoteDiarizationService:
                 speaker_distribution[speaker] = speaker_distribution.get(speaker, 0) + 1
             logger.debug(f"🔍 Speaker distribution in diarization: {speaker_distribution}")
             
-            return diarization_segments
+            # Gérer les embeddings si demandés (comme WhisperX)
+            if return_embeddings and embeddings is not None:
+                # Extraire les labels de speakers depuis la diarization
+                # Si on a accès à l'objet Annotation original, utiliser labels()
+                speaker_embeddings_dict = {}
+                try:
+                    if diarization and hasattr(diarization, 'labels'):
+                        # Obtenir les labels dans l'ordre
+                        speaker_labels = list(diarization.labels())
+                        for idx, speaker_label in enumerate(speaker_labels):
+                            if idx < len(embeddings):
+                                # Convertir le tensor en liste (comme WhisperX)
+                                if hasattr(embeddings[idx], 'tolist'):
+                                    speaker_embeddings_dict[speaker_label] = embeddings[idx].tolist()
+                                elif isinstance(embeddings[idx], (list, np.ndarray)):
+                                    speaker_embeddings_dict[speaker_label] = list(embeddings[idx])
+                                else:
+                                    speaker_embeddings_dict[speaker_label] = embeddings[idx]
+                    else:
+                        # Fallback : utiliser les speakers uniques détectés
+                        unique_speakers_list = sorted(unique_speakers)
+                        for idx, speaker_label in enumerate(unique_speakers_list):
+                            if idx < len(embeddings):
+                                if hasattr(embeddings[idx], 'tolist'):
+                                    speaker_embeddings_dict[speaker_label] = embeddings[idx].tolist()
+                                elif isinstance(embeddings[idx], (list, np.ndarray)):
+                                    speaker_embeddings_dict[speaker_label] = list(embeddings[idx])
+                                else:
+                                    speaker_embeddings_dict[speaker_label] = embeddings[idx]
+                    
+                    logger.info(f"✅ Extracted speaker embeddings for {len(speaker_embeddings_dict)} speakers")
+                    return diarization_segments, speaker_embeddings_dict
+                except Exception as e:
+                    logger.warning(f"⚠️ Error extracting embeddings: {e}, returning without embeddings")
+                    return diarization_segments, None
+            elif return_embeddings:
+                # Embeddings demandés mais non disponibles
+                logger.warning("⚠️ Embeddings requested but not available")
+                return diarization_segments, None
+            else:
+                return diarization_segments
             
         except Exception as e:
             logger.error(f"❌ Error during pyannote diarization: {e}", exc_info=True)
+            if return_embeddings:
+                return [], None
             return []
     
     def assign_speakers_to_segments(
         self, 
         transcription_segments: List[Dict], 
-        diarization_segments: List[Dict]
+        diarization_segments: List[Dict],
+        speaker_embeddings: Optional[Dict[str, List[float]]] = None,
+        fill_nearest: bool = False
     ) -> List[Dict]:
         """
         Assigne les locuteurs aux segments de transcription en fonction des timestamps.
-        Même implémentation que StereoDiarizationService pour compatibilité.
+        Même implémentation que WhisperX pour compatibilité.
         
         Args:
-            transcription_segments: Segments de transcription avec start/end/text
+            transcription_segments: Segments de transcription avec start/end/text (et optionnellement 'words')
             diarization_segments: Segments de diarisation avec start/end/speaker
+            speaker_embeddings: Optionnel, dictionnaire d'embeddings par speaker (comme WhisperX)
+            fill_nearest: Si True, assigne les speakers même sans chevauchement direct (comme WhisperX)
             
         Returns:
-            Segments de transcription avec le champ 'speaker' ajouté
+            Segments de transcription avec le champ 'speaker' ajouté (et 'speaker' ajouté aux mots si présents)
         """
         if not diarization_segments:
             logger.warning("⚠️ No diarization segments, skipping speaker assignment")
             return transcription_segments
         
-        # Logger les segments de diarisation pour debug
+        # Convertir diarization_segments en format similaire à pandas DataFrame pour faciliter les calculs
+        # (comme WhisperX utilise pandas)
         unique_diarization_speakers = set(seg["speaker"] for seg in diarization_segments)
         logger.info(f"🔍 Diarization segments: {len(diarization_segments)} segments with speakers: {unique_diarization_speakers}")
         
-        # Logger quelques exemples de segments de diarisation pour comprendre leur répartition
-        logger.info(f"🔍 First few diarization segments: {diarization_segments[:5]}")
-        logger.info(f"🔍 Last few diarization segments: {diarization_segments[-5:]}")
-        
-        # Logger la répartition temporelle par speaker
-        for speaker_id in sorted(unique_diarization_speakers):
-            speaker_segments = [s for s in diarization_segments if s["speaker"] == speaker_id]
-            if speaker_segments:
-                first_seg = speaker_segments[0]
-                last_seg = speaker_segments[-1]
-                total_duration = sum(s["end"] - s["start"] for s in speaker_segments)
-                logger.info(
-                    f"🔍 {speaker_id}: {len(speaker_segments)} segments, "
-                    f"first: [{first_seg['start']:.2f}-{first_seg['end']:.2f}], "
-                    f"last: [{last_seg['start']:.2f}-{last_seg['end']:.2f}], "
-                    f"total duration: {total_duration:.2f}s"
-                )
-        
-        # Logger les segments de transcription pour comparaison
-        logger.info(f"🔍 Transcription segments: {len(transcription_segments)} segments")
-        if transcription_segments:
-            logger.info(f"🔍 First transcription segment: {transcription_segments[0]}")
-            logger.info(f"🔍 Last transcription segment: {transcription_segments[-1]}")
-        
-        # Créer une liste des segments avec speakers assignés
-        segments_with_speakers = []
-        speaker_assignment_count = {}
-        
-        # AMÉLIORATION : Détecter les changements de speaker basés sur les patterns temporels
-        # Si un speaker apparaît seulement après un certain temps, vérifier s'il devrait apparaître plus tôt
-        # en analysant les segments de transcription qui précèdent sa première détection
-        
-        # Trouver le premier segment de diarisation pour chaque speaker
-        first_segment_by_speaker = {}
-        for speaker_id in unique_diarization_speakers:
-            speaker_segments = [s for s in diarization_segments if s["speaker"] == speaker_id]
-            if speaker_segments:
-                first_segment_by_speaker[speaker_id] = min(speaker_segments, key=lambda x: x['start'])
-        
-        # Si un speaker n'apparaît qu'après plusieurs secondes, vérifier s'il devrait être détecté plus tôt
-        # en analysant les segments de transcription qui précèdent sa première détection
-        early_segments_candidates = {}
-        if len(first_segment_by_speaker) > 1:
-            # Trouver le speaker qui apparaît le plus tard
-            latest_speaker = max(first_segment_by_speaker.items(), key=lambda x: x[1]['start'])
-            latest_speaker_id, latest_first_seg = latest_speaker
+        # Logique exacte de WhisperX : calculer intersection et union pour chaque segment
+        for seg in transcription_segments:
+            trans_start = seg["start"]
+            trans_end = seg["end"]
             
-            # Si ce speaker apparaît après 5 secondes, analyser les segments précédents
-            if latest_first_seg['start'] > 5.0:
-                logger.info(
-                    f"🔍 Speaker {latest_speaker_id} detected late (first at {latest_first_seg['start']:.2f}s). "
-                    f"Analyzing early transcription segments for potential early detection..."
-                )
-                
-                # Analyser les premiers segments de transcription (avant la première détection de ce speaker)
-                early_trans_segments = [
-                    seg for seg in transcription_segments 
-                    if seg['start'] < latest_first_seg['start']
-                ]
-                
-                if early_trans_segments:
-                    logger.info(
-                        f"🔍 Found {len(early_trans_segments)} transcription segments before "
-                        f"{latest_speaker_id} first detection at {latest_first_seg['start']:.2f}s"
-                    )
-        
-        # Utiliser la même logique que WhisperX : sommer les intersections par speaker
-        # C'est plus simple et plus efficace que de chercher le meilleur segment individuel
-        for idx, trans_seg in enumerate(transcription_segments):
-            trans_start = trans_seg["start"]
-            trans_end = trans_seg["end"]
-            
-            # Calculer l'intersection avec chaque segment de diarisation et grouper par speaker
-            speaker_intersections = {}
-            
-            # Logger tous les segments de diarisation qui chevauchent ce segment de transcription
-            overlapping_diar_segments = []
-            
+            # Calculer intersection et union pour chaque segment de diarisation (comme WhisperX)
+            diar_segments_with_intersection = []
             for diar_seg in diarization_segments:
                 diar_start = diar_seg["start"]
                 diar_end = diar_seg["end"]
                 speaker = diar_seg["speaker"]
                 
-                # Calculer l'intersection (overlap) entre le segment de transcription et le segment de diarisation
-                intersection_start = max(trans_start, diar_start)
-                intersection_end = min(trans_end, diar_end)
-                intersection = max(0.0, intersection_end - intersection_start)
+                # Calculer intersection (comme WhisperX)
+                intersection = max(0.0, min(diar_end, trans_end) - max(diar_start, trans_start))
+                # Calculer union (comme WhisperX)
+                union = max(diar_end, trans_end) - min(diar_start, trans_start)
                 
-                # Sommer les intersections par speaker (comme WhisperX)
-                if intersection > 0:
+                diar_segments_with_intersection.append({
+                    'speaker': speaker,
+                    'start': diar_start,
+                    'end': diar_end,
+                    'intersection': intersection,
+                    'union': union
+                })
+            
+            # Filtrer selon fill_nearest (comme WhisperX)
+            if not fill_nearest:
+                # Mode normal : ne garder que les segments avec intersection > 0
+                dia_tmp = [d for d in diar_segments_with_intersection if d['intersection'] > 0]
+            else:
+                # Mode fill_nearest : utiliser tous les segments même sans intersection
+                dia_tmp = diar_segments_with_intersection
+            
+            # Assigner le speaker au segment (comme WhisperX)
+            if len(dia_tmp) > 0:
+                # Grouper par speaker et sommer les intersections
+                speaker_intersections = {}
+                for d in dia_tmp:
+                    speaker = d['speaker']
                     if speaker not in speaker_intersections:
                         speaker_intersections[speaker] = 0.0
-                    speaker_intersections[speaker] += intersection
-                    overlapping_diar_segments.append({
-                        'speaker': speaker,
-                        'diar_start': diar_start,
-                        'diar_end': diar_end,
-                        'intersection': intersection
-                    })
-            
-            # Logger pour les premiers et derniers segments de transcription
-            if idx < 2 or idx >= len(transcription_segments) - 2:
-                logger.info(
-                    f"🔍 Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
-                    f"intersections by speaker: {speaker_intersections}, "
-                    f"overlapping diar segments: {len(overlapping_diar_segments)}"
-                )
-                if overlapping_diar_segments:
-                    logger.info(f"🔍   Overlapping diarization details (first 3): {overlapping_diar_segments[:3]}")
-            
-            # Logger pour TOUS les segments de transcription qui ont plusieurs speakers
-            if len(speaker_intersections) > 1:
-                logger.info(
-                    f"🔍 Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
-                    f"MULTIPLE SPEAKERS detected! intersections: {speaker_intersections}"
-                )
-                logger.info(f"🔍   Overlapping diarization segments: {overlapping_diar_segments}")
-            elif len(speaker_intersections) == 0:
-                logger.warning(
-                    f"⚠️ Trans seg {idx} [{trans_start:.2f}-{trans_end:.2f}]: "
-                    f"No overlapping diarization segments found!"
-                )
-            
-            # AMÉLIORATION : Pour les premiers segments de transcription, forcer l'alternance si 2 speakers sont détectés
-            # mais qu'un speaker apparaît tardivement (après 5 secondes)
-            # Cela corrige les cas où pyannote détecte un speaker tardivement alors qu'il parle dès le début
-            if idx < 2 and len(first_segment_by_speaker) == 2:
-                speaker_ids = sorted(first_segment_by_speaker.keys())
-                speaker_0_id, speaker_1_id = speaker_ids[0], speaker_ids[1]
-                speaker_0_first = first_segment_by_speaker[speaker_0_id]['start']
-                speaker_1_first = first_segment_by_speaker[speaker_1_id]['start']
+                    speaker_intersections[speaker] += d['intersection']
                 
-                # Si un speaker apparaît tardivement (après 5 secondes) mais qu'on a forcé 2 speakers,
-                # appliquer une alternance forcée pour les 2 premiers segments
-                late_speaker = None
-                early_speaker = None
-                if speaker_0_first > 5.0:
-                    late_speaker = speaker_0_id
-                    early_speaker = speaker_1_id
-                elif speaker_1_first > 5.0:
-                    late_speaker = speaker_1_id
-                    early_speaker = speaker_0_id
-                
-                # Si un speaker apparaît tardivement, forcer l'alternance pour les premiers segments
-                if late_speaker and early_speaker:
-                    # Pour le premier segment (idx=0), forcer l'alternance en ajoutant une intersection
-                    # pour le speaker tardif si on a forcé 2 speakers
-                    if idx == 0:
-                        # Si le segment actuel n'a qu'une intersection avec le speaker qui apparaît tôt,
-                        # mais qu'on a forcé 2 speakers, ajouter une intersection pour le speaker tardif
-                        # pour permettre l'alternance
-                        if (late_speaker not in speaker_intersections and 
-                            early_speaker in speaker_intersections and
-                            self.num_speakers == 2):  # On a forcé 2 speakers
-                            
-                            # Ajouter une intersection potentielle pour le speaker tardif
-                            # basée sur le fait qu'on sait qu'il y a 2 speakers et qu'ils doivent alterner
-                            segment_duration = trans_end - trans_start
-                            # Pour le premier segment, donner 60% de la durée au speaker tardif
-                            # pour permettre l'alternance (le speaker qui apparaît tôt garde 40%)
-                            potential_intersection = segment_duration * 0.6
-                            speaker_intersections[late_speaker] = potential_intersection
-                            
-                            # Réduire légèrement l'intersection du speaker qui apparaît tôt pour équilibrer
-                            if early_speaker in speaker_intersections:
-                                speaker_intersections[early_speaker] *= 0.7  # Réduire à 70%
-                            
-                            logger.info(
-                                f"🔍 Trans seg {idx}: FORCED ALTERNATION - added intersection for {late_speaker} "
-                                f"(late speaker detected at {first_segment_by_speaker[late_speaker]['start']:.2f}s, "
-                                f"potential: {potential_intersection:.2f}s) to enable speaker alternation "
-                                f"(num_speakers={self.num_speakers} forced)"
-                            )
-                    elif idx == 1:
-                        # Pour le deuxième segment, vérifier si le premier segment a été assigné au speaker tardif
-                        # Si oui, alterner avec le speaker qui apparaît tôt
-                        if len(segments_with_speakers) > 0:
-                            prev_speaker = segments_with_speakers[-1].get('speaker')
-                            if prev_speaker == late_speaker:
-                                # Le segment précédent était le speaker tardif, forcer l'alternance avec le speaker qui apparaît tôt
-                                segment_duration = trans_end - trans_start
-                                if early_speaker not in speaker_intersections:
-                                    speaker_intersections[early_speaker] = 0.0
-                                speaker_intersections[early_speaker] += segment_duration * 0.8
-                                logger.info(
-                                    f"🔍 Trans seg {idx}: FORCED ALTERNATION - previous was {late_speaker}, "
-                                    f"adding intersection for {early_speaker} (potential: {segment_duration * 0.8:.2f}s) to alternate"
-                                )
-                            elif prev_speaker == early_speaker:
-                                # Le segment précédent était le speaker qui apparaît tôt, continuer avec le speaker tardif
-                                segment_duration = trans_end - trans_start
-                                if late_speaker not in speaker_intersections:
-                                    speaker_intersections[late_speaker] = 0.0
-                                speaker_intersections[late_speaker] += segment_duration * 0.8
-                                logger.info(
-                                    f"🔍 Trans seg {idx}: FORCED ALTERNATION - previous was {early_speaker}, "
-                                    f"adding intersection for {late_speaker} (potential: {segment_duration * 0.8:.2f}s) to alternate"
-                                )
-            
-            # AMÉLIORATION : Pour les premiers segments de transcription, détecter les changements de speaker
-            # basés sur les patterns de conversation (alternance de speakers)
-            # Si on a 2 speakers détectés et que le premier segment est assigné au même speaker que le deuxième,
-            # mais qu'un autre speaker apparaît peu après, alterner les speakers pour les premiers segments
-            elif idx < 3 and len(first_segment_by_speaker) == 2:
-                # Si c'est le premier segment (idx=0) et qu'on a déjà assigné un speaker au segment précédent
-                # (dans une boucle précédente), vérifier l'alternance
-                if idx == 0:
-                    # Pour le premier segment, si SPEAKER_01 est détecté dès le début mais SPEAKER_00 apparaît plus tard,
-                    # et que SPEAKER_00 apparaît dans les 5 premières secondes, considérer une alternance
-                    speaker_ids = sorted(first_segment_by_speaker.keys())
-                    if len(speaker_ids) == 2:
-                        speaker_0_id, speaker_1_id = speaker_ids[0], speaker_ids[1]
-                        speaker_0_first = first_segment_by_speaker[speaker_0_id]['start']
-                        speaker_1_first = first_segment_by_speaker[speaker_1_id]['start']
-                        
-                        # Si les deux speakers apparaissent dans les 5 premières secondes mais avec un décalage
-                        # et que le premier segment de transcription commence avant les deux détections
-                        if (speaker_0_first < 5.0 and speaker_1_first < 5.0 and 
-                            abs(speaker_0_first - speaker_1_first) > 0.5 and
-                            trans_start < min(speaker_0_first, speaker_1_first)):
-                            
-                            # Si SPEAKER_01 a une intersection mais SPEAKER_00 n'en a pas,
-                            # et que SPEAKER_00 apparaît très tôt (dans les 2 premières secondes),
-                            # considérer une alternance potentielle
-                            if (speaker_0_id in speaker_intersections and 
-                                speaker_1_id not in speaker_intersections and
-                                speaker_1_first < 2.5):
-                                
-                                # Ajouter une intersection potentielle pour SPEAKER_01 basée sur l'alternance
-                                # Plus le segment est proche du début de SPEAKER_01, plus l'intersection est grande
-                                time_to_speaker_1 = speaker_1_first - trans_start
-                                if time_to_speaker_1 < 3.0:  # SPEAKER_01 apparaît dans les 3 secondes
-                                    potential_intersection = max(0.0, (3.0 - time_to_speaker_1) * 0.4)  # Max 1.2s
-                                    if speaker_1_id not in speaker_intersections:
-                                        speaker_intersections[speaker_1_id] = 0.0
-                                    speaker_intersections[speaker_1_id] += potential_intersection
-                                    logger.info(
-                                        f"🔍 Trans seg {idx}: Added potential intersection for {speaker_1_id} "
-                                        f"based on early detection pattern (time to detection: {time_to_speaker_1:.2f}s, "
-                                        f"potential: {potential_intersection:.2f}s)"
-                                    )
-                
-                # Pour les segments suivants (idx=1, 2), vérifier l'alternance avec le segment précédent
-                elif idx > 0 and len(segments_with_speakers) > 0:
-                    prev_speaker = segments_with_speakers[-1].get('speaker')
-                    # Si le segment précédent a le même speaker que celui détecté pour ce segment,
-                    # mais qu'un autre speaker apparaît peu après, considérer l'alternance
-                    if prev_speaker and len(speaker_intersections) > 0:
-                        detected_speaker = max(speaker_intersections.items(), key=lambda x: x[1])[0]
-                        if prev_speaker == detected_speaker:
-                            # Chercher l'autre speaker qui devrait alterner
-                            other_speakers = [s for s in unique_diarization_speakers if s != prev_speaker]
-                            if other_speakers:
-                                other_speaker = other_speakers[0]
-                                # Si l'autre speaker apparaît dans les 3 secondes suivantes, considérer l'alternance
-                                if other_speaker in first_segment_by_speaker:
-                                    other_first = first_segment_by_speaker[other_speaker]['start']
-                                    if trans_start < other_first < trans_end + 3.0:
-                                        # Ajouter une intersection potentielle pour l'alternance
-                                        time_to_other = other_first - trans_start
-                                        if time_to_other >= 0:
-                                            potential_intersection = max(0.0, (3.0 - time_to_other) * 0.3)
-                                            if other_speaker not in speaker_intersections:
-                                                speaker_intersections[other_speaker] = 0.0
-                                            speaker_intersections[other_speaker] += potential_intersection
-                                            logger.info(
-                                                f"🔍 Trans seg {idx}: Added potential intersection for {other_speaker} "
-                                                f"based on speaker alternation pattern (time to detection: {time_to_other:.2f}s, "
-                                                f"potential: {potential_intersection:.2f}s)"
-                                            )
-            
-            # Choisir le speaker avec la plus grande somme d'intersections (comme WhisperX)
-            # AMÉLIORATION: Si plusieurs speakers ont des intersections similaires (différence < 30%),
-            # privilégier celui qui a le plus de segments distincts (meilleure couverture)
-            # AMÉLIORATION: Pour les premiers segments, appliquer une logique d'alternance plus agressive
-            if speaker_intersections:
-                if len(speaker_intersections) > 1:
-                    # Calculer les intersections par speaker
-                    sorted_speakers = sorted(speaker_intersections.items(), key=lambda x: x[1], reverse=True)
-                    best_speaker, best_intersection = sorted_speakers[0]
-                    second_speaker, second_intersection = sorted_speakers[1]
-                    
-                    # AMÉLIORATION : Pour les 2 premiers segments, appliquer une logique d'alternance
-                    # si les deux speakers ont des intersections similaires (ratio > 0.5)
-                    intersection_ratio = second_intersection / best_intersection if best_intersection > 0 else 0
-                    
-                    # Pour les premiers segments, être plus agressif avec l'alternance
-                    if idx < 2 and intersection_ratio > 0.5:
-                        # Vérifier si on a déjà assigné un speaker au segment précédent
-                        if idx > 0 and len(segments_with_speakers) > 0:
-                            prev_speaker = segments_with_speakers[-1].get('speaker')
-                            # Si le segment précédent a le meilleur speaker, alterner avec le deuxième
-                            if prev_speaker == best_speaker:
-                                logger.info(
-                                    f"🔍 Trans seg {idx}: Applying alternation logic - previous segment was {best_speaker}, "
-                                    f"choosing {second_speaker} for alternation (ratio: {intersection_ratio:.2f})"
-                                )
-                                speaker = second_speaker
-                            # Si le segment précédent a le deuxième speaker, alterner avec le meilleur
-                            elif prev_speaker == second_speaker:
-                                logger.info(
-                                    f"🔍 Trans seg {idx}: Applying alternation logic - previous segment was {second_speaker}, "
-                                    f"choosing {best_speaker} for alternation (ratio: {intersection_ratio:.2f})"
-                                )
-                                speaker = best_speaker
-                            else:
-                                # Pas d'alternance possible, utiliser la logique normale
-                                speaker = best_speaker
-                        else:
-                            # Premier segment : logique spéciale pour forcer l'alternance
-                            # Si un speaker apparaît tardivement (après 5s) mais qu'on a forcé 2 speakers,
-                            # forcer l'alternance en choisissant le speaker tardif pour le premier segment
-                            speaker_ids = sorted(first_segment_by_speaker.keys())
-                            if len(speaker_ids) == 2:
-                                speaker_0_id, speaker_1_id = speaker_ids[0], speaker_ids[1]
-                                speaker_0_first = first_segment_by_speaker[speaker_0_id]['start']
-                                speaker_1_first = first_segment_by_speaker[speaker_1_id]['start']
-                                
-                                # Si un speaker apparaît tardivement (après 5s) et qu'on a forcé 2 speakers,
-                                # forcer l'alternance en choisissant le speaker tardif pour le premier segment
-                                if (speaker_0_first > 5.0 or speaker_1_first > 5.0) and self.num_speakers == 2:
-                                    # Identifier le speaker tardif et le speaker qui apparaît tôt
-                                    if speaker_0_first > 5.0:
-                                        late_speaker = speaker_0_id
-                                        early_speaker = speaker_1_id
-                                    else:
-                                        late_speaker = speaker_1_id
-                                        early_speaker = speaker_0_id
-                                    
-                                    # Si les intersections sont similaires (ratio > 0.3) OU si le speaker tardif
-                                    # a une intersection ajoutée par la logique forcée, choisir le speaker tardif
-                                    # pour forcer l'alternance dès le premier segment
-                                    if (intersection_ratio > 0.3 or late_speaker in speaker_intersections):
-                                        logger.info(
-                                            f"🔍 Trans seg {idx}: FIRST SEGMENT - FORCING ALTERNATION - choosing {late_speaker} "
-                                            f"(late speaker detected at {first_segment_by_speaker[late_speaker]['start']:.2f}s) "
-                                            f"over {early_speaker} (appears at {first_segment_by_speaker[early_speaker]['start']:.2f}s) "
-                                            f"to enable speaker alternation (num_speakers={self.num_speakers} forced, ratio: {intersection_ratio:.2f})"
-                                        )
-                                        speaker = late_speaker
-                                    else:
-                                        # Si le ratio est trop faible, utiliser la logique normale mais avec un biais
-                                        # vers le speaker tardif si on a forcé l'alternance
-                                        if late_speaker in speaker_intersections:
-                                            speaker = late_speaker
-                                            logger.info(
-                                                f"🔍 Trans seg {idx}: FIRST SEGMENT - choosing {late_speaker} "
-                                                f"(forced alternation intersection present) over {best_speaker}"
-                                            )
-                                        else:
-                                            speaker = best_speaker
-                                else:
-                                    # Les deux speakers apparaissent tôt, utiliser la logique normale
-                                    best_first = first_segment_by_speaker.get(best_speaker, {}).get('start', float('inf'))
-                                    second_first = first_segment_by_speaker.get(second_speaker, {}).get('start', float('inf'))
-                                    
-                                    # Si le deuxième speaker apparaît plus tôt et que les intersections sont similaires,
-                                    # le choisir pour le premier segment (corrige les cas où pyannote inverse les speakers)
-                                    if second_first < best_first and intersection_ratio > 0.5:
-                                        logger.info(
-                                            f"🔍 Trans seg {idx}: First segment - choosing {second_speaker} (appears earlier at {second_first:.2f}s) "
-                                            f"over {best_speaker} (appears at {best_first:.2f}s) due to similar intersections (ratio: {intersection_ratio:.2f})"
-                                        )
-                                        speaker = second_speaker
-                                    else:
-                                        speaker = best_speaker
-                            else:
-                                speaker = best_speaker
-                    elif intersection_ratio > 0.7:  # Si le deuxième speaker a au moins 70% de l'intersection du premier
-                        # Compter les segments distincts pour chaque speaker dans cette zone
-                        speaker_segment_counts = {}
-                        for diar_seg in overlapping_diar_segments:
-                            speaker = diar_seg['speaker']
-                            if speaker in speaker_intersections:
-                                speaker_segment_counts[speaker] = speaker_segment_counts.get(speaker, 0) + 1
-                        
-                        # Si le deuxième speaker a plus de segments distincts, le choisir
-                        if second_speaker in speaker_segment_counts and best_speaker in speaker_segment_counts:
-                            if speaker_segment_counts[second_speaker] > speaker_segment_counts[best_speaker]:
-                                logger.info(
-                                    f"🔍 Trans seg {idx}: Close call! Chose {second_speaker} "
-                                    f"(intersection: {second_intersection:.2f}s, segments: {speaker_segment_counts[second_speaker]}) "
-                                    f"over {best_speaker} (intersection: {best_intersection:.2f}s, segments: {speaker_segment_counts[best_speaker]}) "
-                                    f"due to more distinct segments"
-                                )
-                                speaker = second_speaker
-                            else:
-                                speaker = best_speaker
-                        else:
-                            speaker = best_speaker
-                    else:
-                        speaker = best_speaker
-                    
-                    # Logger si on choisit SPEAKER_00 alors qu'il y a plusieurs speakers
-                    if speaker == "SPEAKER_00":
-                        logger.info(
-                            f"🔍 Trans seg {idx}: Chose SPEAKER_00 with {speaker_intersections.get('SPEAKER_00', 0):.2f}s "
-                            f"over SPEAKER_01 with {speaker_intersections.get('SPEAKER_01', 0):.2f}s"
-                        )
-                else:
-                    speaker = list(speaker_intersections.keys())[0]
+                # Choisir le speaker avec la plus grande somme d'intersections
+                speaker = max(speaker_intersections.items(), key=lambda x: x[1])[0]
+                seg["speaker"] = speaker
             else:
-                # Si aucun overlap, utiliser "UNKNOWN"
-                speaker = "UNKNOWN"
+                seg["speaker"] = "UNKNOWN"
             
-            # Créer le segment avec le speaker
-            seg_with_speaker = trans_seg.copy()
-            seg_with_speaker["speaker"] = speaker
-            segments_with_speakers.append(seg_with_speaker)
-            
-            # Compter les assignations par speaker
-            speaker_assignment_count[speaker] = speaker_assignment_count.get(speaker, 0) + 1
+            # Assigner aussi aux mots individuels si présents (comme WhisperX)
+            if 'words' in seg:
+                for word in seg['words']:
+                    if 'start' in word and 'end' in word:
+                        word_start = word['start']
+                        word_end = word['end']
+                        
+                        # Calculer intersection pour chaque segment de diarisation
+                        word_diar_segments_with_intersection = []
+                        for diar_seg in diarization_segments:
+                            diar_start = diar_seg["start"]
+                            diar_end = diar_seg["end"]
+                            speaker = diar_seg["speaker"]
+                            
+                            # Calculer intersection (comme WhisperX)
+                            intersection = max(0.0, min(diar_end, word_end) - max(diar_start, word_start))
+                            # Calculer union (comme WhisperX)
+                            union = max(diar_end, word_end) - min(diar_start, word_start)
+                            
+                            word_diar_segments_with_intersection.append({
+                                'speaker': speaker,
+                                'start': diar_start,
+                                'end': diar_end,
+                                'intersection': intersection,
+                                'union': union
+                            })
+                        
+                        # Filtrer selon fill_nearest (comme WhisperX)
+                        if not fill_nearest:
+                            # Mode normal : ne garder que les segments avec intersection > 0
+                            word_dia_tmp = [d for d in word_diar_segments_with_intersection if d['intersection'] > 0]
+                        else:
+                            # Mode fill_nearest : utiliser tous les segments même sans intersection
+                            word_dia_tmp = word_diar_segments_with_intersection
+                        
+                        # Assigner le speaker au mot (comme WhisperX)
+                        if len(word_dia_tmp) > 0:
+                            # Grouper par speaker et sommer les intersections
+                            word_speaker_intersections = {}
+                            for d in word_dia_tmp:
+                                speaker = d['speaker']
+                                if speaker not in word_speaker_intersections:
+                                    word_speaker_intersections[speaker] = 0.0
+                                word_speaker_intersections[speaker] += d['intersection']
+                            
+                            # Choisir le speaker avec la plus grande somme d'intersections
+                            word_speaker = max(word_speaker_intersections.items(), key=lambda x: x[1])[0]
+                            word["speaker"] = word_speaker
+                        else:
+                            word["speaker"] = "UNKNOWN"
         
-        logger.info(
-            f"✅ Assigned speakers to {len(segments_with_speakers)} transcription segments"
-        )
+        # Ajouter les embeddings si disponibles (comme WhisperX)
+        if speaker_embeddings is not None:
+            # Ajouter les embeddings au résultat (comme WhisperX)
+            # Note: Dans WhisperX, les embeddings sont ajoutés au niveau du résultat global,
+            # mais ici on les retourne séparément pour compatibilité avec notre structure
+            logger.info(f"✅ Speaker embeddings available for {len(speaker_embeddings)} speakers")
+        
+        logger.info(f"✅ Assigned speakers to {len(transcription_segments)} transcription segments")
+        
+        # Compter les assignations par speaker
+        speaker_assignment_count = {}
+        for seg in transcription_segments:
+            speaker = seg.get("speaker", "UNKNOWN")
+            speaker_assignment_count[speaker] = speaker_assignment_count.get(speaker, 0) + 1
         logger.info(f"🔍 Speaker assignment distribution: {speaker_assignment_count}")
         
         # Vérifier si tous les segments ont le même speaker (problème potentiel)
-        assigned_speakers = set(seg["speaker"] for seg in segments_with_speakers)
+        assigned_speakers = set(seg.get("speaker", "UNKNOWN") for seg in transcription_segments)
         if len(assigned_speakers) == 1 and len(unique_diarization_speakers) > 1:
-            # Calculer la couverture temporelle de la transcription
-            if transcription_segments:
-                trans_start = min(seg["start"] for seg in transcription_segments)
-                trans_end = max(seg["end"] for seg in transcription_segments)
-            else:
-                trans_start = trans_end = 0.0
-            
-            # Trouver les segments de diarisation non couverts
-            uncovered_speakers = []
-            for speaker_id in unique_diarization_speakers:
-                if speaker_id not in assigned_speakers:
-                    speaker_segments = [s for s in diarization_segments if s["speaker"] == speaker_id]
-                    uncovered_duration = sum(s["end"] - s["start"] for s in speaker_segments)
-                    uncovered_segments = [s for s in speaker_segments if s["end"] > trans_end or s["start"] < trans_start]
-                    if uncovered_segments:
-                        uncovered_speakers.append({
-                            'speaker': speaker_id,
-                            'segments': len(uncovered_segments),
-                            'duration': uncovered_duration,
-                            'first_segment': uncovered_segments[0],
-                            'last_segment': uncovered_segments[-1]
-                        })
-            
-            logger.warning(
-                f"⚠️ WARNING: All transcription segments assigned to {assigned_speakers}, "
-                f"but diarization detected {len(unique_diarization_speakers)} speakers: {unique_diarization_speakers}"
-            )
-            if uncovered_speakers:
+            assigned_speaker = list(assigned_speakers)[0]
+            if assigned_speaker != "UNKNOWN":
+                # Calculer la couverture temporelle de la transcription
+                if transcription_segments:
+                    trans_start = min(seg["start"] for seg in transcription_segments)
+                    trans_end = max(seg["end"] for seg in transcription_segments)
+                else:
+                    trans_start = trans_end = 0.0
+                
+                # Trouver les segments de diarisation non couverts
+                uncovered_speakers = []
+                for speaker_id in unique_diarization_speakers:
+                    if speaker_id not in assigned_speakers:
+                        speaker_segments = [s for s in diarization_segments if s["speaker"] == speaker_id]
+                        uncovered_duration = sum(s["end"] - s["start"] for s in speaker_segments)
+                        uncovered_segments = [s for s in speaker_segments if s["end"] > trans_end or s["start"] < trans_start]
+                        if uncovered_segments:
+                            uncovered_speakers.append({
+                                'speaker': speaker_id,
+                                'segments': len(uncovered_segments),
+                                'duration': uncovered_duration,
+                                'first_segment': uncovered_segments[0],
+                                'last_segment': uncovered_segments[-1]
+                            })
+                
                 logger.warning(
-                    f"⚠️ Transcription coverage: [{trans_start:.2f}s - {trans_end:.2f}s], "
-                    f"but {len(uncovered_speakers)} speaker(s) have segments outside this range:"
+                    f"⚠️ WARNING: All transcription segments assigned to {assigned_speakers}, "
+                    f"but diarization detected {len(unique_diarization_speakers)} speakers: {unique_diarization_speakers}"
                 )
-                for uc in uncovered_speakers:
+                if uncovered_speakers:
                     logger.warning(
-                        f"⚠️   {uc['speaker']}: {uc['segments']} segments ({uc['duration']:.2f}s), "
-                        f"first: [{uc['first_segment']['start']:.2f}-{uc['first_segment']['end']:.2f}], "
-                        f"last: [{uc['last_segment']['start']:.2f}-{uc['last_segment']['end']:.2f}]"
+                        f"⚠️ Transcription coverage: [{trans_start:.2f}s - {trans_end:.2f}s], "
+                        f"but {len(uncovered_speakers)} speaker(s) have segments outside this range:"
                     )
-                logger.warning(
-                    f"⚠️ This suggests VAD/Whisper skipped these audio regions. "
-                    f"Consider adjusting VAD parameters (threshold, min_speech_duration_ms) or disabling VAD."
-                )
-            else:
-                logger.warning(f"⚠️ This might indicate a problem with speaker assignment logic")
+                    for uc in uncovered_speakers:
+                        logger.warning(
+                            f"⚠️   {uc['speaker']}: {uc['segments']} segments ({uc['duration']:.2f}s), "
+                            f"first: [{uc['first_segment']['start']:.2f}-{uc['first_segment']['end']:.2f}], "
+                            f"last: [{uc['last_segment']['start']:.2f}-{uc['last_segment']['end']:.2f}]"
+                        )
+                    logger.warning(
+                        f"⚠️ This suggests VAD/Whisper skipped these audio regions. "
+                        f"Consider adjusting VAD parameters (threshold, min_speech_duration_ms) or disabling VAD."
+                    )
+                else:
+                    logger.warning(f"⚠️ This might indicate a problem with speaker assignment logic")
         
-        return segments_with_speakers
+        return transcription_segments
     
     @property
     def pipeline(self):
